@@ -1,5 +1,6 @@
 from sdk import camerasdk
 import time
+import os
 
 # The global camera object lives here
 _camera = None
@@ -28,9 +29,16 @@ def open_camera():
     if not _camera:
         raise(RuntimeError("No camera found, shutting down."))
 
+def verify_connection():
+    try:
+        is_connected = _camera.is_connected()
+        return is_connected
+    except:
+        return False
+
 def get_camera():
     """Returns the camera connected"""
-    if _camera is None:
+    if not verify_connection():
         raise RuntimeError("Camera not connected")
     return _camera
 
@@ -39,14 +47,76 @@ def close_camera():
     # When we write to globals we must state it
     global _camera
 
-    if _camera:
-        _camera.close()
-        _camera = None
+    if not verify_connection():
+        return False
+    
+    _camera.close()
+    _camera = None
+    return True
 
 def start_recording():
-    if _camera:
-        _camera.start_recording()
+    if not verify_connection():
+        return False
+    
+    _camera.start_recording()
+    return True
 
 def stop_recording():
-    if _camera:
-        _camera.stop_recording()
+    if not verify_connection():
+        return False
+    
+    _camera.stop_recording()
+    return True
+
+def get_camera_files_list():
+    if not verify_connection():
+        return False
+    
+    return _camera.get_camera_files_list()
+
+def download_file(file, local_file, progress_callback):
+    if not verify_connection():
+        return False
+    
+    _camera.download_file(file, local_file, progress_callback)
+    return True
+
+def download_all(project_path):
+    if not verify_connection():
+        return False
+    
+    files = get_camera_files_list()
+
+    for file in files:
+        file_name = os.path.basename(file)
+        local_file = os.path.join(project_path, file_name)
+
+        if not download_file(file, local_file, progress):
+            return False
+    
+    return True
+
+def delete_file(file):
+    if not verify_connection():
+        return False
+    
+    _camera.delete_file(file)
+    return True
+
+def delete_all():
+    if not verify_connection():
+        return False
+    
+    files = get_camera_files_list()
+
+    for file in files:
+        if not delete_file(file):
+            return False
+    
+    return True
+
+# Helpers
+def progress(current, total):
+    """Callback function for the download progress"""
+    percent = (current / total) * 100
+    print(f"Downloading file: {round(percent, 3)} %")
