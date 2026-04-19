@@ -1,6 +1,7 @@
 # Shared functions for all the sensors
 import os
 from app.core.camera import download_all, delete_all
+from app.core.config import *
 
 def download_all_data(project_name, cleanup=False):
     """Downloads data into the USB drive
@@ -22,8 +23,7 @@ def download_all_data(project_name, cleanup=False):
     return True
 
 def get_project_path(project_name):
-    base_path = "/media/pi"
-    base_path = "/home/franta/Downloads"
+    base_path = BASE_PATH
     devices = os.listdir(base_path)
     print(f"Found devices: {devices}")
     
