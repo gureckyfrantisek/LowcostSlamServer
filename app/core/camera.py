@@ -115,6 +115,12 @@ def delete_all():
     
     return True
 
+def get_media_time():
+    if not verify_connection():
+        return False
+    
+    return _camera.get_media_time()
+
 # Helpers
 def progress(current, total):
     """Callback function for the download progress"""
