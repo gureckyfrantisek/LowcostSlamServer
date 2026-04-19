@@ -43,7 +43,7 @@ def start_measurement(project_name):
 
     # Start IMU and GNSS immediately
     imu_start_ns = imu.start_logging(project_path)
-    # gnss_start_ns = gnss.start_logging(project_path)
+    gnss_start_ns = gnss.start_logging(project_path)
 
     # Start recording
     camera.start_recording()
@@ -57,7 +57,7 @@ def start_measurement(project_name):
 
     # Save the IMU and GNSS offsets
     _measurement.imu_start_offset_ns = imu_start_ns - t0_ns
-    # _measurement.gnss_start_offset_ns = gnss_offset - t0_ns
+    _measurement.gnss_start_offset_ns = gnss_start_ns - t0_ns
 
     return _measurement
 
@@ -67,7 +67,7 @@ def stop_measurement():
         return False
 
     camera.stop_recording()
-    # gnss.stop_logging()
+    gnss.stop_logging()
     imu.stop_logging()
 
     project_path = get_project_path(_measurement.name)
