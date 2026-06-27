@@ -22,6 +22,31 @@ def get_measurement() -> Optional[Measurement]:
 def now_ns() -> int:
     return time.time_ns()
 
+def get_status():
+    """Checks the status of all sensors
+
+    Returns:
+        Int: a binary sum of the results
+
+        4 for camera
+
+        2 for GNSS
+
+        1 for IMU
+    """
+    result = 0
+
+    if not camera.verify_connection():
+        result += 4
+
+    if not gnss.verify_connection():
+        result += 2
+
+    if not imu.verify_connection():
+        result += 1
+
+    return result
+
 
 def start_measurement(project_name):
     """Starts video capture and GNSS and IMU logging
@@ -117,6 +142,8 @@ def get_project_path(project_name):
         return False
     
     usb_path = os.path.join(base_path, devices[0])
+
+    # Mock usb
     usb_path = os.path.join(base_path, '00usbtest')
     project_path = os.path.join(usb_path, project_name)
 

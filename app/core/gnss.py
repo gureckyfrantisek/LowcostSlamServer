@@ -5,6 +5,10 @@ import time
 _stop_event: threading.Event = None
 _thread: threading.Thread = None
 
+def verify_connection():
+    """Will implement with the sensor"""
+    return True
+
 # For now this just simulates data logging
 def start_logging(project_path) -> int:
     global _stop_event, _thread
