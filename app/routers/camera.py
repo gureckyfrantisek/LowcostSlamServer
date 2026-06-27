@@ -115,3 +115,8 @@ def shutdown_camera_route():
         status_code=200,
         content={"status": "shutdown"}
     )
+
+@router.post("/delay_test")
+def delay_test_route(count: int = 10):
+    results = run_delay_test(count)
+    return responses.JSONResponse(status_code=200, content=results)

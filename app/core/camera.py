@@ -1,6 +1,8 @@
 from sdk import camerasdk
 import time
 import os
+import re
+from datetime import datetime
 
 # The global camera object lives here
 _camera = None
@@ -157,3 +159,46 @@ def progress(current, total):
     """Callback function for the download progress"""
     percent = (current / total) * 100
     print(f"Downloading file: {round(percent, 3)} %")
+
+def run_delay_test(count: int = 10):
+    # Redirect stderr to file
+    LOG_FILE = "sdk_stderr.log"
+    log_fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    old_stderr = os.dup(2)
+    os.dup2(log_fd, 2)
+    os.close(log_fd)
+
+    t0_ns_list = []
+    for _ in range(count):
+        _camera.start_recording()
+        t0_ns_list.append(time.time_ns())
+        time.sleep(0.5)
+        _camera.stop_recording()
+        time.sleep(0.5)
+
+    # Restore stderr
+    os.dup2(old_stderr, 2)
+    os.close(old_stderr)
+
+    # Parse log
+    with open(LOG_FILE) as f:
+        lines = f.readlines()
+
+    # Remove file after reading
+    os.remove(LOG_FILE)
+
+    pattern = re.compile(r'\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\].*NORMAL_CAPTURE')
+    now = datetime.now()
+    cam_times = []
+    for line in lines:
+        m = pattern.search(line)
+        if m:
+            parsed = datetime.strptime(f"{now.year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S.%f")
+            cam_times.append(int(parsed.timestamp() * 1_000_000_000))
+
+    deltas = [t0 - tc for t0, tc in zip(t0_ns_list, cam_times)]
+    return {
+        "count": len(deltas),
+        "average_ms": sum(deltas) / len(deltas) / 1_000_000 if deltas else None,
+        "deltas_ms": [d / 1_000_000 for d in deltas]
+    }
