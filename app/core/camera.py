@@ -128,11 +128,29 @@ def delete_all():
     
     return True
 
+def get_battery_status():
+    if not verify_connection():
+        return False
+
+    return _camera.get_battery_status()
+
+def get_storage_state():
+    if not verify_connection():
+        return False
+
+    return _camera.get_storage_state()
+
 def get_media_time():
     if not verify_connection():
         return False
     
     return _camera.get_media_time()
+
+def shutdown_camera():
+    if not verify_connection():
+        return False
+
+    return _camera.shutdown_camera()
 
 # Helpers
 def progress(current, total):

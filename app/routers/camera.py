@@ -71,3 +71,47 @@ def delete_files_route(
         status_code=500,
         content={"status": "couldn't delete"}
     )
+
+@router.get("/battery")
+def get_battery_route():
+    response = get_battery_status()
+
+    if not response:
+        return responses.JSONResponse(
+            status_code=500,
+            content={"status": "couldn't check battery"}
+        )
+
+    return responses.JSONResponse(
+        status_code=200,
+        content={"battery": response}
+    )
+
+
+@router.get("/storage")
+def get_storage_route():
+    response = get_storage_state()
+
+    if not response:
+        return responses.JSONResponse(
+            status_code=500,
+            content={"status": "couldn't check storage"}
+        )
+
+    return responses.JSONResponse(
+        status_code=200,
+        content={"storage": response}
+    )
+
+@router.post("/shutdown")
+def shutdown_camera_route():
+    if not shutdown_camera():
+        return responses.JSONResponse(
+            status_code=500,
+            content={"status": "couldn't shutdown"}
+        )
+
+    return responses.JSONResponse(
+        status_code=200,
+        content={"status": "shutdown"}
+    )
