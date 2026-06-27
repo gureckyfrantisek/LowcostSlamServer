@@ -70,7 +70,7 @@ def stop_recording():
 
 def get_camera_files_list():
     if not verify_connection():
-        return False
+        return 1
     
     return _camera.get_camera_files_list()
 

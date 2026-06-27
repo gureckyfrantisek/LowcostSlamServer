@@ -2,22 +2,13 @@
 import os
 import time
 import json
+import shutil
 from dataclasses import dataclass
 from typing import Optional
 from app.core import camera, config, gnss, imu
 
-@dataclass
-class Measurement:
-    name: str
-    t0_ns: int
-    camera_media_time_at_t0_ms: Optional[int] = None
-    gnss_start_offset_ns: Optional[int] = None
-    imu_start_offset_ns: Optional[int] = None
-
-_measurement: Optional[Measurement] = None
-
-def get_measurement() -> Optional[Measurement]:
-    return _measurement
+# Only a shortcut to if we're recording or not
+_measurement = False
 
 def now_ns() -> int:
     return time.time_ns()
@@ -57,34 +48,40 @@ def start_measurement(project_name):
 
     # Return if already recording
     if _measurement:
-        return False
+        return 1
+
+    _measurement = True
 
     # Name the measurement so that the files are consistent too
-    project_path = get_project_path(project_name)
-
-    if not project_path:
-        # No USB drive inserted, cannot create project folder
-        return False
+    local_path = get_local_path(project_name)
 
     # Start IMU and GNSS immediately
-    imu_start_ns = imu.start_logging(project_path)
-    gnss_start_ns = gnss.start_logging(project_path)
+    imu_start_ns = imu.start_logging(local_path)
+    gnss_start_ns = gnss.start_logging(local_path)
 
     # Start recording
-    camera.start_recording()
+    if not camera.start_recording():
+        return 2
 
     # Get time anchor
     t0_ns = now_ns()
     media_time = camera.get_media_time()
 
-    _measurement = Measurement(project_name, t0_ns)
-    _measurement.camera_media_time_at_t0_ms = media_time
+    # Write metadata file for postprocessing
+    metadata = {
+        "name": project_name,
+        "t0_ns": t0_ns,
+        "camera_media_time_at_t0_ms": media_time,
+        "gnss_start_offset_ns": imu_start_ns - t0_ns,
+        "imu_start_offset_ns": gnss_start_ns - t0_ns,
+    }
 
-    # Save the IMU and GNSS offsets
-    _measurement.imu_start_offset_ns = imu_start_ns - t0_ns
-    _measurement.gnss_start_offset_ns = gnss_start_ns - t0_ns
+    meta_path = os.path.join(local_path, "meta.json")
 
-    return _measurement
+    with open(meta_path, "w") as file:
+        json.dump(metadata, file, indent=2)
+
+    return True
 
 def stop_measurement():
     global _measurement
@@ -95,26 +92,10 @@ def stop_measurement():
     gnss.stop_logging()
     imu.stop_logging()
 
-    project_path = get_project_path(_measurement.name)
-
-    # Write metadata file for postprocessing
-    metadata = {
-        "name": _measurement.name,
-        "t0_ns": _measurement.t0_ns,
-        "camera_media_time_at_t0_ms": _measurement.camera_media_time_at_t0_ms,
-        "gnss_start_offset_ns": _measurement.gnss_start_offset_ns,
-        "imu_start_offset_ns": _measurement.imu_start_offset_ns,
-    }
-
-    meta_path = os.path.join(project_path, "meta.json")
-
-    with open(meta_path, "w") as file:
-        json.dump(metadata, file, indent=2)
-
     _measurement = None
     return True
 
-def download_all_data(project_name, cleanup=False):
+def download_project_data(project_name, cleanup=False):
     """Downloads data into the USB drive
     Parameters:
         project_name (string): Project name
@@ -122,19 +103,88 @@ def download_all_data(project_name, cleanup=False):
     Returns:
         bool: Success status
     """
-    # Get the path
-    project_path = get_project_path(project_name)
+
+    # Check if project exists
+    projects = get_projects()
+
+    if type(projects) == bool or project_name not in projects:
+        return 1
+    
+    # Get the paths
+    local_path = get_local_path(project_name)
+    usb_path = get_usb_path(project_name)
+
+    # USB not connected
+    if not usb_path:
+        return 2
+
+    # Copy local data to USB
+    try:
+        shutil.copytree(local_path, usb_path, dirs_exist_ok=True)
+    except Exception as e:
+        print(f"Copy failed: {e}")
+        return 3
 
     # Download camera data
-    cam_status = camera.download_all(project_path)
+    cam_status = camera.download_all(usb_path)
 
+    # Camera download failed
+    if not cam_status:
+        return 4
+    
     if cleanup:
         cam_del_status = camera.delete_all()
+        shutil.rmtree(local_path, ignore_errors=True)
+
+        # Cleanup failed
+        if not cam_del_status:
+            return 5
     
     return True
 
-def get_project_path(project_name):
-    base_path = config.BASE_PATH
+def get_projects():
+    base_path = config.LOCAL_DATA_PATH
+    try:
+        projects = os.listdir(base_path)
+    except Exception as e:
+        print(f"Directory list failed: {e}")
+        return False
+
+    return projects
+
+def get_project_files(project_name):
+    projects = get_projects()
+
+    if type(projects) == bool:
+        return 1
+    
+    if project_name not in projects:
+        return 2
+
+    base_path = config.LOCAL_DATA_PATH
+
+    local_path = os.path.join(base_path, project_name)
+
+    try:
+        project_files = os.listdir(local_path)
+    except Exception as e:
+        print(f"Directory list failed: {e}")
+        return 3
+    
+    return project_files
+
+def get_local_path(project_name):
+    base_path = config.LOCAL_DATA_PATH
+    
+    local_path = os.path.join(base_path, project_name)
+
+    if not os.path.exists(local_path):
+        os.makedirs(local_path)
+    
+    return local_path
+
+def get_usb_path(project_name):
+    base_path = config.BASE_USB_PATH
     devices = os.listdir(base_path)
     print(f"Found devices: {devices}")
     
@@ -143,8 +193,6 @@ def get_project_path(project_name):
     
     usb_path = os.path.join(base_path, devices[0])
 
-    # Mock usb
-    usb_path = os.path.join(base_path, '00usbtest')
     project_path = os.path.join(usb_path, project_name)
 
     if not os.path.exists(project_path):

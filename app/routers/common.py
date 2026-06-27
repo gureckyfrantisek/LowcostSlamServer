@@ -1,6 +1,6 @@
 # The / endpoints for common actions
 from fastapi import APIRouter, HTTPException, responses
-from app.core.common import get_status, start_measurement, stop_measurement, download_all_data
+from app.core.common import *
 
 router = APIRouter()
 
@@ -26,30 +26,118 @@ def get_status_route():
         }
     )
 
-@router.post("/start/{project_name}")
-def start_measurement_route(project_name: str):
+@router.post("/start")
+def start_measurement_route(project_name):
     result = start_measurement(project_name)
     
     if not result:
-        raise HTTPException(status_code=500, detail="Failed to start measurement")
+        responses.JSONResponse(
+            status_code=500,
+            content={"status": "couldn't start"}
+        )
     
-    return {
-        "name": result.name,
-        "t0_ns": result.t0_ns,
-        "camera_media_time_at_t0_ms": result.camera_media_time_at_t0_ms,
-        "gnss_start_offset_ns": result.gnss_start_offset_ns,
-        "imu_start_offset_ns": result.imu_start_offset_ns,
-    }
+    return responses.JSONResponse(
+        status_code=200,
+        content={"status": "started"}
+    )
 
 @router.post("/stop")
 def stop_measurement_route():
     if not stop_measurement():
-        raise HTTPException(status_code=400, detail="No active measurement")
-    return False
+        responses.JSONResponse(
+            status_code=500,
+            content={"status": "couldn't stop"}
+        )
 
-@router.post("/download-all/{project_name}")
-def download_all_route(
+    return responses.JSONResponse(
+        status_code=200,
+        content={"status": "stopped"}
+    )
+
+@router.get("/projects")
+def get_projects_route():
+    projects = get_projects()
+
+    if not projects:
+        return responses.JSONResponse(
+            status_code=500,
+            content={"status": "no local projects"}
+        )
+
+    return responses.JSONResponse(
+        status_code=200,
+        content={"projects": projects}
+    )
+
+
+@router.get("/projects/{project_name}")
+def get_project_files_route(project_name):
+    response = get_project_files(project_name)
+
+    match response:
+        case 1:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "no local projects"}
+            )
+        
+        case 2:
+            return responses.JSONResponse(
+                status_code=400,
+                content={"status": "invalid project"}
+            )
+        case 3:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "directory list failed"}
+            )
+        
+        case _:
+            return responses.JSONResponse(
+                status_code=200,
+                content={"project_files": response}
+            )
+
+@router.post("/download")
+def download_project_route(
     project_name,
     cleanup=False
 ):
-    return download_all_data(project_name, cleanup)
+    response = download_project_data(project_name, cleanup)
+
+    match response:
+        case True:
+            return responses.JSONResponse(
+                status_code=200,
+                content={"status": "downloaded"}
+            )
+        
+        case 1:
+            return responses.JSONResponse(
+                status_code=400,
+                content={"status": "invalid project"}
+            )
+        
+        case 2:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "USB unavailable"}
+            )
+        
+        case 3:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "copy failed"}
+            )
+        
+        case 4:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "camera download failed"}
+            )
+        
+        case 5:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "cleanup failed"}
+            )
