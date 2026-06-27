@@ -81,6 +81,19 @@ def download_file(file, local_file, progress_callback):
     _camera.download_file(file, local_file, progress_callback)
     return True
 
+def download_files(project_path, files):
+    if not verify_connection():
+        return False
+
+    for file in files:
+        file_name = os.path.basename(file)
+        local_file = os.path.join(project_path, file_name)
+
+        if not download_file(file, local_file, progress):
+            return False
+
+    return True
+
 def download_all(project_path):
     if not verify_connection():
         return False

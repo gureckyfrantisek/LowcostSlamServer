@@ -98,6 +98,37 @@ def get_project_files_route(project_name):
                 content={"project_files": response}
             )
 
+
+@router.delete("/projects/{project_name}")
+def delete_project_files_route(project_name):
+    response = delete_project_files(project_name)
+
+    match response:
+        case 1:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "no local projects"}
+            )
+
+        case 2:
+            return responses.JSONResponse(
+                status_code=400,
+                content={"status": "invalid project"}
+            )
+
+        case 3:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "directory deletion failed"}
+            )
+
+        case _:
+            return responses.JSONResponse(
+                status_code=200,
+                content={"status": "deleted"}
+            )
+
+
 @router.post("/download")
 def download_project_route(
     project_name,

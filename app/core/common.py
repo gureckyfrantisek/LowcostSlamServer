@@ -55,6 +55,9 @@ def start_measurement(project_name):
     # Name the measurement so that the files are consistent too
     local_path = get_local_path(project_name)
 
+    # Get files before for the diff later
+    files_old = camera.get_camera_files_list()
+
     # Start IMU and GNSS immediately
     imu_start_ns = imu.start_logging(local_path)
     gnss_start_ns = gnss.start_logging(local_path)
@@ -67,6 +70,9 @@ def start_measurement(project_name):
     t0_ns = now_ns()
     media_time = camera.get_media_time()
 
+    # Files recorded
+    files_new = list(set(camera.get_camera_files_list()) - set(files_old))
+
     # Write metadata file for postprocessing
     metadata = {
         "name": project_name,
@@ -74,6 +80,7 @@ def start_measurement(project_name):
         "camera_media_time_at_t0_ms": media_time,
         "gnss_start_offset_ns": imu_start_ns - t0_ns,
         "imu_start_offset_ns": gnss_start_ns - t0_ns,
+        "camera_files": files_new
     }
 
     meta_path = os.path.join(local_path, "meta.json")
@@ -125,8 +132,14 @@ def download_project_data(project_name, cleanup=False):
         print(f"Copy failed: {e}")
         return 3
 
+    # Get camera file names from meta.json
+    meta_path = os.path.join(local_path, "meta.json")
+    with open(meta_path, "r") as file:
+        metadata = json.load(file)
+    camera_files = metadata.get("camera_files", [])
+
     # Download camera data
-    cam_status = camera.download_all(usb_path)
+    cam_status = camera.download_files(usb_path, camera_files)
 
     # Camera download failed
     if not cam_status:
@@ -157,7 +170,7 @@ def get_project_files(project_name):
 
     if type(projects) == bool:
         return 1
-    
+
     if project_name not in projects:
         return 2
 
@@ -172,6 +185,28 @@ def get_project_files(project_name):
         return 3
     
     return project_files
+
+def delete_project_files(project_name):
+    projects = get_projects()
+
+    if type(projects) == bool:
+        return 1
+
+    if project_name not in projects:
+        return 2
+
+    base_path = config.LOCAL_DATA_PATH
+
+    local_path = os.path.join(base_path, project_name)
+
+    try:
+        shutil.rmtree(local_path)
+    except Exception as e:
+        print(f"Directory delete failed: {e}")
+        return 3
+
+    return
+
 
 def get_local_path(project_name):
     base_path = config.LOCAL_DATA_PATH
