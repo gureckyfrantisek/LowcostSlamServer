@@ -22,9 +22,16 @@ def start_logging(project_path) -> int:
                 # Simulates the step
                 time.sleep(0.01)
 
+    # Prepare the thread
     _thread = threading.Thread(target=_log, daemon=True)
-    start_ns = time.time_ns()
+
+    # Capture time before and after
+    before_ns = time.time_ns()
     _thread.start()
+    after_ns = time.time_ns()
+
+    # Return the midpoint
+    start_ns = (before_ns + after_ns) / 2
 
     return start_ns
 
