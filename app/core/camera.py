@@ -57,11 +57,51 @@ def close_camera():
     return True
 
 def start_recording():
+    """
+    Starts recording and returns the actual t0 in nanoseconds,
+    parsed from the camera's own NORMAL_CAPTURE log line.
+    """
     if not verify_connection():
         return False
-    
+
+    # Redirect stderr to capture SDK logs
+    LOG_FILE = "sdk_capture.log"
+    log_fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    old_stderr = os.dup(2)
+    os.dup2(log_fd, 2)
+    os.close(log_fd)
+
     _camera.start_recording()
-    return True
+
+    # Poll the log file until NORMAL_CAPTURE appears (or timeout)
+    pattern = re.compile(r'\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\].*NORMAL_CAPTURE')
+    deadline = time.time() + 3.0  # 3s timeout
+    t0_ns = None
+
+    while time.time() < deadline:
+        with open(LOG_FILE) as f:
+            for line in f:
+                m = pattern.search(line)
+                if m:
+                    now = datetime.now()
+                    parsed = datetime.strptime(
+                        f"{now.year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S.%f"
+                    )
+                    t0_ns = int(parsed.timestamp() * 1_000_000_000)
+                    break
+        if t0_ns:
+            break
+        time.sleep(0.001)
+
+    # Restore stderr
+    os.dup2(old_stderr, 2)
+    os.close(old_stderr)
+    os.remove(LOG_FILE)
+
+    if not t0_ns:
+        raise RuntimeError("Timed out waiting for NORMAL_CAPTURE confirmation")
+
+    return t0_ns
 
 def stop_recording():
     if not verify_connection():
@@ -190,9 +230,16 @@ def run_delay_test(count: int = 10):
     pattern = re.compile(r'\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\].*NORMAL_CAPTURE')
     now = datetime.now()
     cam_times = []
+    in_recording = False
+    not_capture = re.compile(r'NOT_CAPTURE')
     for line in lines:
+        if not_capture.search(line):
+            in_recording = False
+            continue
         m = pattern.search(line)
-        if m:
+        if m and not in_recording:
+            in_recording = True
+            print(f"Matched: {line.strip()}")
             parsed = datetime.strptime(f"{now.year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S.%f")
             cam_times.append(int(parsed.timestamp() * 1_000_000_000))
 

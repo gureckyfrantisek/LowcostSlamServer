@@ -28,22 +28,30 @@ def get_status_route():
 
 @router.post("/start")
 def start_measurement_route(project_name):
-    result = start_measurement(project_name)
+    response = start_measurement(project_name)
     
-    if not result:
-        responses.JSONResponse(
-            status_code=500,
-            content={"status": "couldn't start"}
-        )
-    
-    return responses.JSONResponse(
-        status_code=200,
-        content={"status": "started"}
-    )
+    match response:
+        case True:
+            return responses.JSONResponse(
+                status_code=200,
+                content={"status": "started"}
+            )
+        
+        case 1:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "already measuring"}
+            )
+        
+        case 2:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "failed to start camera"}
+            )
 
 @router.post("/stop")
-def stop_measurement_route():
-    if not stop_measurement():
+def stop_measurement_route(project_name):
+    if not stop_measurement(project_name):
         responses.JSONResponse(
             status_code=500,
             content={"status": "couldn't stop"}
@@ -104,6 +112,12 @@ def delete_project_files_route(project_name):
     response = delete_project_files(project_name)
 
     match response:
+        case True:
+            return responses.JSONResponse(
+                status_code=200,
+                content={"status": "deleted"}
+            )
+        
         case 1:
             return responses.JSONResponse(
                 status_code=500,
@@ -120,12 +134,6 @@ def delete_project_files_route(project_name):
             return responses.JSONResponse(
                 status_code=500,
                 content={"status": "directory deletion failed"}
-            )
-
-        case _:
-            return responses.JSONResponse(
-                status_code=200,
-                content={"status": "deleted"}
             )
 
 

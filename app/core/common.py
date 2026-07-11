@@ -50,28 +50,20 @@ def start_measurement(project_name):
     if _measurement:
         return 1
 
-    _measurement = True
-
     # Name the measurement so that the files are consistent too
     local_path = get_local_path(project_name)
-
-    # Get files before for the diff later
-    files_old = camera.get_camera_files_list()
 
     # Start IMU and GNSS immediately
     imu_start_ns = imu.start_logging(local_path)
     gnss_start_ns = gnss.start_logging(local_path)
 
     # Start recording
-    if not camera.start_recording():
+    t0_ns = camera.start_recording()
+    if not t0_ns:
         return 2
 
     # Get time anchor
-    t0_ns = now_ns()
     media_time = camera.get_media_time()
-
-    # Files recorded
-    files_new = list(set(camera.get_camera_files_list()) - set(files_old))
 
     # Write metadata file for postprocessing
     metadata = {
@@ -79,8 +71,7 @@ def start_measurement(project_name):
         "t0_ns": t0_ns,
         "camera_media_time_at_t0_ms": media_time,
         "gnss_start_offset_ns": imu_start_ns - t0_ns,
-        "imu_start_offset_ns": gnss_start_ns - t0_ns,
-        "camera_files": files_new
+        "imu_start_offset_ns": gnss_start_ns - t0_ns
     }
 
     meta_path = os.path.join(local_path, "meta.json")
@@ -88,16 +79,37 @@ def start_measurement(project_name):
     with open(meta_path, "w") as file:
         json.dump(metadata, file, indent=2)
 
+    # Only mark as measuring once everything succeeded
+    _measurement = True
     return True
 
-def stop_measurement():
+def stop_measurement(project_name):
     global _measurement
     if not _measurement:
         return False
+    
+    # Files before ending
+    files_old = camera.get_camera_files_list()
 
     camera.stop_recording()
     gnss.stop_logging()
     imu.stop_logging()
+
+    # Files recorded
+    files_new = list(set(camera.get_camera_files_list()) - set(files_old))
+
+    # Write it to meta.json
+    local_path = get_local_path(project_name)
+
+    meta_path = os.path.join(local_path, "meta.json")
+
+    with open(meta_path, "r") as f:
+        metadata = json.load(f)
+
+    metadata["camera_files"] = files_new
+
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
 
     _measurement = None
     return True
@@ -146,7 +158,11 @@ def download_project_data(project_name, cleanup=False):
         return 4
     
     if cleanup:
-        cam_del_status = camera.delete_all()
+        # Delete camera files for this project
+        for file in camera_files:
+            cam_del_status = camera.delete_file(file)
+        
+        # Delete the local files after transfer
         shutil.rmtree(local_path, ignore_errors=True)
 
         # Cleanup failed
@@ -205,7 +221,7 @@ def delete_project_files(project_name):
         print(f"Directory delete failed: {e}")
         return 3
 
-    return
+    return True
 
 
 def get_local_path(project_name):
@@ -220,7 +236,12 @@ def get_local_path(project_name):
 
 def get_usb_path(project_name):
     base_path = config.BASE_USB_PATH
-    devices = os.listdir(base_path)
+    
+    try:
+        devices = os.listdir(base_path)
+    except FileNotFoundError:
+        return False
+    
     print(f"Found devices: {devices}")
     
     if not devices:
