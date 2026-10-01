@@ -70,8 +70,8 @@ def start_measurement(project_name):
         "name": project_name,
         "t0_ns": t0_ns,
         "camera_media_time_at_t0_ms": media_time,
-        "gnss_start_offset_ns": imu_start_ns - t0_ns,
-        "imu_start_offset_ns": gnss_start_ns - t0_ns
+        "gnss_start_offset_ns": gnss_start_ns - t0_ns,
+        "imu_start_offset_ns": imu_start_ns - t0_ns
     }
 
     meta_path = os.path.join(local_path, "meta.json")
@@ -158,7 +158,8 @@ def download_project_data(project_name, cleanup=False):
         return 4
     
     if cleanup:
-        # Delete camera files for this project
+        # Delete camera files for this project (nothing to delete counts as success)
+        cam_del_status = True
         for file in camera_files:
             cam_del_status = camera.delete_file(file)
         

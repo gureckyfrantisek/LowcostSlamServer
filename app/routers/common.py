@@ -52,7 +52,7 @@ def start_measurement_route(project_name):
 @router.post("/stop")
 def stop_measurement_route(project_name):
     if not stop_measurement(project_name):
-        responses.JSONResponse(
+        return responses.JSONResponse(
             status_code=500,
             content={"status": "couldn't stop"}
         )
@@ -140,7 +140,7 @@ def delete_project_files_route(project_name):
 @router.post("/download")
 def download_project_route(
     project_name,
-    cleanup=False
+    cleanup: bool = False
 ):
     response = download_project_data(project_name, cleanup)
 
