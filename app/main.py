@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.routers import camera, imu, gnss, common
+from app.routers import camera, imu, gnss, common, websocket
 from app.core.camera import open_camera, close_camera
 from app.core.gnss import open_gnss_port, close_gnss_port
 
@@ -24,3 +24,4 @@ app.include_router(camera.router, prefix="/camera", tags=["Camera"])
 app.include_router(imu.router, prefix="/imu", tags=["IMU"])
 app.include_router(gnss.router, prefix="/gnss", tags=["GNSS"])
 app.include_router(common.router, tags=["Common"])
+app.include_router(websocket.router)
