@@ -1,7 +1,7 @@
 import asyncio
 import queue
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.core.gnss import subscribe, unsubscribe
+from app.core.gnss import subscribe, unsubscribe, NMEA
 
 router = APIRouter()
 
@@ -9,12 +9,12 @@ router = APIRouter()
 async def gnss_stream(websocket: WebSocket):
     await websocket.accept()
 
-    q = subscribe(maxsize=100)
+    q = subscribe(kinds=[NMEA], maxsize=100)
     try:
         while True:
             try:
                 # q.get blocks, so run it off the event loop
-                ts, line = await asyncio.to_thread(q.get, True, 0.5)
+                ts, _, line = await asyncio.to_thread(q.get, True, 0.5)
             except queue.Empty:
                 continue
             await websocket.send_text(f"{ts},{line.decode(errors='replace').rstrip()}")
