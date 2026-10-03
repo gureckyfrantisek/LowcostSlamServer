@@ -3,7 +3,7 @@ import queue
 import threading
 import time
 import serial
-from config import GNSS_PORT, GNSS_BAUD_RATE
+from app.core import config
 
 _port: serial.Serial | None = None
 _reader_stop: threading.Event = threading.Event()
@@ -55,7 +55,7 @@ def open_gnss_port():
     global _port, _reader_thread
     if _port and _port.is_open:
         return
-    _port = serial.Serial(GNSS_PORT, GNSS_BAUD_RATE, timeout=0.1)
+    _port = serial.Serial(config.GNSS_PORT, config.GNSS_BAUD_RATE, timeout=0.1)
     _reader_stop.clear()
     _reader_thread = threading.Thread(target=_read_loop, daemon=True)
     _reader_thread.start()
