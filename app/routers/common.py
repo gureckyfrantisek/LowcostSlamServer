@@ -49,6 +49,12 @@ def start_measurement_route(project_name):
                 content={"status": "failed to start camera"}
             )
 
+        case 3:
+            return responses.JSONResponse(
+                status_code=400,
+                content={"status": "IMU not calibrated"}
+            )
+
 @router.post("/stop")
 def stop_measurement_route(project_name):
     if not stop_measurement(project_name):

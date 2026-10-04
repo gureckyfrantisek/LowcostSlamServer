@@ -7,7 +7,7 @@ from getpass import getuser
 load_dotenv()
 
 # Config variables
-LOCAL_DATA_PATH = "/tmp/projects" if not os.getenv('LOCAL_DATA_PATH') else os.getenv('LOCAL_DATA_PATH')
+LOCAL_DATA_PATH = "~/measurements" if not os.getenv('LOCAL_DATA_PATH') else os.getenv('LOCAL_DATA_PATH')
 BASE_USB_PATH = f"/media/{getuser()}" if not os.getenv('BASE_USB_PATH') else os.getenv('BASE_USB_PATH')
 
 # Serial port settings
@@ -19,3 +19,6 @@ IMU_BAUD_RATE_1 = 115200 if not os.getenv('IMU_BAUD_RATE_1') else os.getenv('IMU
 
 IMU_PORT_2 = "/dev/ttyACM2" if not os.getenv('IMU_PORT_2') else os.getenv('IMU_PORT_2')
 IMU_BAUD_RATE_2 = 115200 if not os.getenv('IMU_BAUD_RATE_2') else os.getenv('IMU_BAUD_RATE_2')
+
+IMU_CALIBRATION_PATH_1 = "~/imu_calibration_1.json" if not os.getenv('IMU_CALIBRATION_PATH_1') else os.getenv('IMU_CALIBRATION_PATH_1')
+IMU_CALIBRATION_PATH_2 = "~/imu_calibration_2.json" if not os.getenv('IMU_CALIBRATION_PATH_2') else os.getenv('IMU_CALIBRATION_PATH_2')
