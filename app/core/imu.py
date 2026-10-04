@@ -116,7 +116,7 @@ def start_logging(project_path) -> int:
 
     def _log():
         global _invalid_lines
-        file_path = f"{project_path}/imu.txt"
+        file_path = f"{project_path}/imu.csv"
 
         with open(file_path, "w") as f:
             f.write(columns_to_log(LOG_COLUMNS) + "\n")
