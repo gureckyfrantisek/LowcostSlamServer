@@ -50,38 +50,87 @@ def start_measurement(project_name):
     if _measurement:
         return 1
 
-    # Name the measurement so that the files are consistent too
-    local_path = get_local_path(project_name)
+    # Refuse before anything starts, so no sensor is left running
+    if not imu.is_calibrated():
+        return 3
 
-    # Start IMU and GNSS immediately
-    imu_start_ns = imu.start_logging(local_path)
-    gnss_start_ns = gnss.start_logging(local_path)
+    # Remember what existed before, so a failed start can be undone cleanly
+    project_path = os.path.join(config.LOCAL_DATA_PATH, project_name)
+    local_files_before = set(os.listdir(project_path)) if os.path.isdir(project_path) else None
+    camera_files_before = camera.get_camera_files_list()
 
-    # Start recording
-    t0_ns = camera.start_recording()
-    if not t0_ns:
-        return 2
+    try:
+        # Name the measurement so that the files are consistent too
+        local_path = get_local_path(project_name)
 
-    # Get time anchor
-    media_time = camera.get_media_time()
+        # Start IMU and GNSS immediately
+        imu_start_ns = imu.start_logging(local_path)
+        gnss_start_ns = gnss.start_logging(local_path)
 
-    # Write metadata file for postprocessing
-    metadata = {
-        "name": project_name,
-        "t0_ns": t0_ns,
-        "camera_media_time_at_t0_ms": media_time,
-        "gnss_start_offset_ns": gnss_start_ns - t0_ns,
-        "imu_start_offset_ns": imu_start_ns - t0_ns
-    }
+        # Start recording
+        t0_ns = camera.start_recording()
+        if not t0_ns:
+            abort_start(project_path, local_files_before, camera_files_before)
+            return 2
 
-    meta_path = os.path.join(local_path, "meta.json")
+        # Get time anchor
+        media_time = camera.get_media_time()
 
-    with open(meta_path, "w") as file:
-        json.dump(metadata, file, indent=2)
+        # Write metadata file for postprocessing
+        metadata = {
+            "name": project_name,
+            "t0_ns": t0_ns,
+            "camera_media_time_at_t0_ms": media_time,
+            "gnss_start_offset_ns": gnss_start_ns - t0_ns,
+            "imu_start_offset_ns": imu_start_ns - t0_ns
+        }
+
+        meta_path = os.path.join(local_path, "meta.json")
+
+        with open(meta_path, "w") as file:
+            json.dump(metadata, file, indent=2)
+    except Exception:
+        abort_start(project_path, local_files_before, camera_files_before)
+        raise
 
     # Only mark as measuring once everything succeeded
     _measurement = True
     return True
+
+def abort_start(project_path, local_files_before, camera_files_before):
+    """Undoes a failed start_measurement: stops IMU/GNSS logging and the
+    recording, then deletes the local and camera files created by the attempt.
+
+    local_files_before: files in the project folder before the attempt, or None
+    if the folder did not exist (the whole folder is then removed)."""
+
+    def attempt(step, *args):
+        # One failing step must not stop the rest of the cleanup
+        try:
+            step(*args)
+        except Exception as e:
+            print(f"Start cleanup step {step.__name__} failed: {e}")
+
+    attempt(imu.stop_logging)
+    attempt(gnss.stop_logging)
+    attempt(camera.stop_recording)
+
+    # Camera files created by the attempt
+    camera_files_now = camera.get_camera_files_list()
+    if isinstance(camera_files_before, (list, tuple, set)) and isinstance(camera_files_now, (list, tuple, set)):
+        for file in set(camera_files_now) - set(camera_files_before):
+            attempt(camera.delete_file, file)
+
+    # Local files created by the attempt
+    if local_files_before is None:
+        shutil.rmtree(project_path, ignore_errors=True)
+    elif os.path.isdir(project_path):
+        for name in set(os.listdir(project_path)) - local_files_before:
+            path = os.path.join(project_path, name)
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                attempt(os.remove, path)
 
 def stop_measurement(project_name):
     global _measurement
