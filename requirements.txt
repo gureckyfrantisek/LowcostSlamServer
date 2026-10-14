@@ -3,3 +3,5 @@ uvicorn
 dotenv
 pyserial
 websockets
+numpy
+pyIGRF
