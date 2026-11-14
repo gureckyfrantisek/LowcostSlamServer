@@ -82,6 +82,25 @@ camera card). `/status` and `/start` report the room left and warn when less tha
 refused when less than 10 minutes fit. `/projects` lists the projects of the stick and of the local disk, and
 `/download` copies a local project to the stick (a project recorded on the stick is already there).
 
+### When something is not connected
+The server starts with whatever is connected. The camera, the GNSS receiver and the IMU each have a supervisor that
+connects the device in the background, and closes and reopens it when it stops answering (an I2C error streak, no
+samples for 2 s, no GNSS data for 5 s, no raw measurements for 10 s, a crashed reader thread). A camera plugged in
+later, or a cable pulled out and pushed in again, is picked up without a restart; a sensor that lost its settings in
+a power dip is configured again.
+
+- `/status` lists every device with its state and the reason (`details`), whether a measurement runs and what went
+  wrong in it (`recording.problems`), the storage, the recent `events`, and `warnings` to show to the user.
+- `/start` is refused with `503` and the names of the missing devices, before anything is started. A start that fails
+  half way is rolled back (`500` with the `reason`), a name that is not one folder is `400`, no room is `507`.
+- A device lost **during** a measurement does not stop it: its data has a gap, written to `events.csv` and to
+  `meta.json` (`events`, `problems`), and `/stop` answers with these `warnings`. The IMU gap is visible in `imu.csv`
+  as a jump of `mono_ns`.
+- The log files are flushed to the disk every 2 seconds, so a power cut or a pulled stick loses seconds, not the
+  recording. A write error (stick pulled out, disk full) stops that log, is reported in `recording.problems` and the
+  events, and `/stop` still works.
+- Stopping the service in the middle of a measurement closes it properly.
+
 ### Tests
 The sensors are simulated, so no hardware is needed for the sensor tests:
 ```bash

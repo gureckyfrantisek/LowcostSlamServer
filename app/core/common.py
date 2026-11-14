@@ -3,12 +3,19 @@ import os
 import time
 import json
 import shutil
+import threading
 from dataclasses import dataclass
 from typing import Optional
-from app.core import camera, config, gnss, imu, storage
+from app.core import camera, config, events, gnss, imu, storage, supervisors
 
 # Only a shortcut to if we're recording or not
 _measurement = False
+_measurement_name = None
+_measurement_start_ns = 0
+_measurement_path = None  # folder of the running measurement (the stick may be gone when it stops)
+_start_error = None  # why the last start failed
+# Start and stop come from separate request threads: one at a time
+_measurement_lock = threading.RLock()
 
 def now_ns() -> int:
     return time.time_ns()
@@ -39,12 +46,45 @@ def get_status():
     return result
 
 
+def get_sensor_states() -> dict:
+    """What each device is doing: ok, or missing with the reason, and since when"""
+    out = {}
+    for name, ok in (("camera", camera.verify_connection()), ("gnss", gnss.verify_connection()),
+                     ("imu", imu.verify_connection())):
+        sup = supervisors.get(name)
+        out[name] = {
+            "state": "ok" if ok else "missing",
+            "detail": None if ok else (sup.error if sup and sup.error else "not connected"),
+            "since": sup.since if sup else None,
+        }
+    return out
+
+def get_start_error() -> str | None:
+    return _start_error
+
+def get_recording_state() -> dict:
+    """Whether a measurement runs and whether something went wrong in it"""
+    problems = []
+    if _measurement:
+        for name, error in (("imu", imu.get_stats().get("log_error")), ("gnss", gnss.get_stats().get("log_error"))):
+            if error:
+                problems.append(f"{name} data is no longer written: {error}")
+        for name, state in get_sensor_states().items():
+            if state["state"] != "ok":
+                problems.append(f"{name} is not connected, its data has a gap")
+    return {"active": bool(_measurement), "project": _measurement_name if _measurement else None,
+            "problems": problems}
+
 def start_measurement(project_name):
     """Starts video capture and GNSS and IMU logging
     Returns:
         Measurement: The measurement object
     """
-    global _measurement
+    with _measurement_lock:
+        return _start_measurement(project_name)
+
+def _start_measurement(project_name):
+    global _measurement, _measurement_name, _measurement_start_ns, _measurement_path, _start_error
 
     # Return if already recording
     if _measurement:
@@ -52,6 +92,10 @@ def start_measurement(project_name):
 
     if not storage.valid_project_name(project_name):
         return 4
+
+    # Refuse before anything starts, so no sensor is left running
+    if any(state["state"] != "ok" for state in get_sensor_states().values()):
+        return 6
 
     # Refuse before anything starts when there is no room for even a short recording
     existing = storage.find_project_path(project_name)
@@ -66,6 +110,8 @@ def start_measurement(project_name):
     try:
         # Name the measurement so that the files are consistent too
         local_path = get_local_path(project_name)
+
+        events.start_recording(local_path)
 
         # Start IMU and GNSS immediately
         imu_start_ns = imu.start_logging(local_path)
@@ -93,12 +139,17 @@ def start_measurement(project_name):
 
         with open(meta_path, "w") as file:
             json.dump(metadata, file, indent=2)
-    except Exception:
+    except Exception as e:
         abort_start(project_path, local_files_before, camera_files_before)
-        raise
+        _start_error = f"{type(e).__name__}: {e}"
+        events.record("server", "error", f"start failed: {_start_error}")
+        return 7
 
     # Only mark as measuring once everything succeeded
     _measurement = True
+    _measurement_name = project_name
+    _measurement_start_ns = time.time_ns()
+    _measurement_path = local_path
     return True
 
 def abort_start(project_path, local_files_before, camera_files_before):
@@ -118,6 +169,7 @@ def abort_start(project_path, local_files_before, camera_files_before):
     attempt(imu.stop_logging)
     attempt(gnss.stop_logging)
     attempt(camera.stop_recording)
+    attempt(events.stop_recording)
 
     # Camera files created by the attempt
     camera_files_now = camera.get_camera_files_list()
@@ -137,35 +189,64 @@ def abort_start(project_path, local_files_before, camera_files_before):
                 attempt(os.remove, path)
 
 def stop_measurement(project_name):
-    global _measurement
+    """Stops everything and closes the recording. Returns False if nothing was recording, else the list of
+    problems met on the way (empty when all is well): a lost sensor or a full disk does not stop the stop"""
+    with _measurement_lock:
+        return _stop_measurement(project_name)
+
+def _stop_measurement(project_name):
+    global _measurement, _measurement_name
     if not _measurement:
         return False
-    
-    # Files before ending
-    files_old = camera.get_camera_files_list()
 
-    camera.stop_recording()
-    gnss.stop_logging()
-    imu.stop_logging()
+    problems = list(get_recording_state()["problems"])
+
+    def attempt(what, step, *args):
+        # One failing step must not leave the rest of the sensors running
+        try:
+            return step(*args)
+        except Exception as e:
+            problems.append(f"{what}: {e}")
+            events.record("server", "error", f"{what}: {e}")
+
+    # Files before ending
+    files_old = attempt("camera file list", camera.get_camera_files_list)
+
+    attempt("stop camera", camera.stop_recording)
+    attempt("stop GNSS", gnss.stop_logging)
+    attempt("stop IMU", imu.stop_logging)
 
     # Files recorded
-    files_new = list(set(camera.get_camera_files_list()) - set(files_old))
+    files_after = attempt("camera file list", camera.get_camera_files_list)
+    if isinstance(files_old, (list, tuple, set)) and isinstance(files_after, (list, tuple, set)):
+        files_new = list(set(files_after) - set(files_old))
+    else:
+        files_new = []
+        problems.append("camera files could not be listed, meta.json has none")
 
-    # Write it to meta.json
-    local_path = get_local_path(project_name)
+    # What happened to the sensors during the measurement: a lost sensor is a gap in its data
+    during = [e for e in events.recent(50) if e["ts_ns"] >= _measurement_start_ns]
+    for event in during:
+        if event["kind"] == "lost":
+            problems.append(f"{event['source']} was lost during the measurement, its data has a gap")
+    problems = list(dict.fromkeys(problems))   # the same sentence once
 
-    meta_path = os.path.join(local_path, "meta.json")
+    def write_meta():
+        meta_path = os.path.join(_measurement_path, "meta.json")
+        with open(meta_path, "r") as f:
+            metadata = json.load(f)
+        metadata["camera_files"] = files_new
+        metadata["problems"] = problems
+        metadata["events"] = during
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
 
-    with open(meta_path, "r") as f:
-        metadata = json.load(f)
+    attempt("meta.json", write_meta)
+    attempt("events", events.stop_recording)
 
-    metadata["camera_files"] = files_new
-
-    with open(meta_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    _measurement = None
-    return True
+    _measurement = False
+    _measurement_name = None
+    return problems
 
 def download_project_data(project_name, cleanup=False):
     """Downloads data into the USB drive

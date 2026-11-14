@@ -8,13 +8,14 @@
 import glob
 import json
 import logging
+import os
 import queue
 import select
 import threading
 import time
 from typing import NamedTuple
 
-from app.core import config, i2c
+from app.core import config, events, i2c
 from app.core.timing import EdgeNumbering, PmQos, SampleClock
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ _I1_WTM = 0x04  # CTRL_REG3: FIFO watermark on INT1
 _FIFO_EN = 0x40  # CTRL_REG5
 _FIFO_STREAM = 0x80  # FIFO_CTRL: stream mode, the oldest sample is dropped when the FIFO is full
 _FIFO_DEPTH = 32
+FSYNC_S = 2.0  # how often the log files are forced to the disk
 _SETTLE_SAMPLES = 7  # high resolution mode settles after 7 samples (datasheet table 12)
 
 
@@ -193,15 +195,21 @@ class Reader:
     """Takes the samples out of the sensor and puts a time on each of them. `step()` is one turn of
     the reader thread: wait for an edge (or a timer), read, time, publish."""
 
-    def __init__(self, port: Lis3dh, edges, publish, publish_pps):
+    STATS = ("samples", "edges", "lost_edges", "lost_samples", "overruns", "gaps", "rescued", "pps", "errors")
+
+    def __init__(self, port: Lis3dh, edges, publish, publish_pps, stats: dict | None = None):
         self.port, self.edges = port, edges
         self.publish, self.publish_pps = publish, publish_pps
         self.clock = SampleClock(port.hz)
         self.numbering = EdgeNumbering(port.hz, port.edge_level)
         # time out after two watermark periods without an edge
         self.wake_ms = max(1, 2 * port.fifo_threshold * 1000 // port.hz)
-        self.stats = dict(samples=0, edges=0, lost_edges=0, lost_samples=0, overruns=0, gaps=0,
-                          rescued=0, pps=0, errors=0)
+        # the counters can belong to the caller, so they run on across a reconnect
+        self.stats = stats if stats is not None else {}
+        for key in self.STATS:
+            self.stats.setdefault(key, 0)
+        self.consecutive_errors = 0   # failed turns in a row: the sensor is gone
+        self.last_sample = time.monotonic()  # when a sample last came out of the sensor
         self.wall_offset_ns = 0
         self._next_offset = 0.0
         self._last_seqno: dict[int, int] = {}
@@ -224,10 +232,20 @@ class Reader:
             self.wall_offset_ns = time.time_ns() - time.monotonic_ns()
             self._next_offset = time.monotonic() + 1
 
+    def healthy(self, stall_s: float = 2.0, max_errors: int = 20) -> bool:
+        """The sensor answers and keeps producing samples. A sensor that lost its power comes back
+        with its FIFO off and produces nothing, so a silence of `stall_s` counts as lost too"""
+        return (self.consecutive_errors < max_errors and time.monotonic() - self.last_sample < stall_s)
+
     def _emit(self, timed):
         for mono, (x, y, z) in timed:
             self.stats["samples"] += 1
             self.publish(mono + self.wall_offset_ns, f"{mono},{x},{y},{z}".encode())
+
+    def _drained(self, drain: Drain):
+        self.clock.add_samples(drain.samples)
+        if drain.samples:
+            self.last_sample = time.monotonic()
 
     def _gap(self, drain: Drain):
         """Samples were lost: time what waits and start the timing over with the next edge"""
@@ -243,8 +261,10 @@ class Reader:
                     self._step_edges()
                 else:
                     self._step_poll()
+                self.consecutive_errors = 0
             except OSError:
                 self.stats["errors"] += 1
+                self.consecutive_errors += 1
                 self.port.errors += 1
                 self._emit(self.clock.restart(time.monotonic_ns()))  # what was read is timed, the rest is a gap
                 self.numbering.restart()
@@ -254,7 +274,7 @@ class Reader:
         if not self._poller.poll(self.wake_ms):
             # no watermark edge for two thresholds' worth of samples: look anyway
             drain = self.port.drain()
-            self.clock.add_samples(drain.samples)
+            self._drained(drain)
             if drain.first_fill >= self.port.fifo_threshold:
                 self.stats["rescued"] += 1
             if drain.overrun:
@@ -278,7 +298,7 @@ class Reader:
         popped_before = self.clock.next_index
         numbers = [self.numbering.number(ns, popped_before) for ns in watermark]
         drain = self.port.drain()
-        self.clock.add_samples(drain.samples)
+        self._drained(drain)
         lost = numbers[0] - self.port.edge_level - popped_before  # samples the sensor made and we never read
         if drain.overrun or lost > 0:
             self.stats["overruns"] += int(drain.overrun)
@@ -294,7 +314,7 @@ class Reader:
         """No edges: read on a timer. The newest sample is taken to be the time of the first look"""
         time.sleep(self.wake_ms / 1000)
         drain = self.port.drain()
-        self.clock.add_samples(drain.samples)
+        self._drained(drain)
         if drain.overrun:
             self.stats["overruns"] += 1
             self._gap(drain)
@@ -320,7 +340,10 @@ _edges: GpioEdges | None = None
 _edges_error: str | None = None
 _reader_stop: threading.Event = threading.Event()
 _reader_thread: threading.Thread | None = None
+_reader_error: str | None = None   # why the reader thread ended, if it did not end because it was told to
 _qos = PmQos(config.PM_QOS_DEVICE, config.PM_QOS_LATENCY_US)
+_stats: dict = {}                  # counters since the server started, they run on across a reconnect
+_lock = threading.RLock()          # open / close / reconnect
 
 # A single reader thread owns the sensor and fans each timestamped line out
 # to every subscriber queue.
@@ -332,6 +355,8 @@ _dropped_lines = 0
 _log_stop: threading.Event | None = None
 _log_thread: threading.Thread | None = None
 _log_queue: queue.Queue | None = None
+_log_pps_queue: queue.Queue | None = None
+_log_error: str | None = None      # why the log writer stopped, if the storage failed
 
 def subscribe(maxsize: int = 100) -> queue.Queue:
     """Returns a queue receiving (timestamp_ns, line_bytes) for every line"""
@@ -365,51 +390,68 @@ def _publish_pps(mono_ns: int, seqno: int):
         except queue.Full:
             pass
 
-def _read_loop():
-    while not _reader_stop.is_set():
-        _reader.step()
-    _reader.finish()
+def _read_loop(reader: Reader, stop: threading.Event):
+    global _reader_error
+    try:
+        while not stop.is_set():
+            reader.step()
+        reader.finish()
+    except Exception as e:  # a bug must not leave a silent server: health check sees the dead thread
+        _reader_error = f"{type(e).__name__}: {e}"
+        log.exception("IMU reader stopped")
 
 def open_imu_port():
-    """Opens the IMU on the I2C bus and starts the reader thread"""
-    global _port, _reader, _edges, _edges_error, _reader_thread
-    if _port and _port.is_open:
-        return
-    _port = Lis3dh(config.IMU_I2C_BUS, config.IMU_I2C_ADDRESS, config.IMU_I2C_HZ,
-                   config.IMU_RANGE_G, config.IMU_FIFO_THRESHOLD)
-    _edges, _edges_error = open_edges()
-    if _edges is None:
-        log.warning("no GPIO edges (%s): IMU samples are timed by polling, good to about a sample period",
-                    _edges_error)
-    _reader = Reader(_port, _edges, _publish, _publish_pps)
-    try:
-        _reader.start()
-    except OSError as e:
-        _release()
-        raise RuntimeError(f"IMU does not answer on I2C address 0x{config.IMU_I2C_ADDRESS:02X}: {e}") from e
-    _reader_stop.clear()
-    _reader_thread = threading.Thread(target=_read_loop, daemon=True)
-    _reader_thread.start()
+    """Opens the IMU on the I2C bus and starts the reader thread. Raises RuntimeError if the sensor
+    is not there. The recording, if one runs, goes on: the subscribers stay"""
+    global _port, _reader, _edges, _edges_error, _reader_thread, _reader_error
+    with _lock:
+        if _port and _port.is_open:
+            return
+        _port = Lis3dh(config.IMU_I2C_BUS, config.IMU_I2C_ADDRESS, config.IMU_I2C_HZ,
+                       config.IMU_RANGE_G, config.IMU_FIFO_THRESHOLD)
+        _edges, _edges_error = open_edges()
+        if _edges is None:
+            log.warning("no GPIO edges (%s): IMU samples are timed by polling, good to about a sample period",
+                        _edges_error)
+        _reader = Reader(_port, _edges, _publish, _publish_pps, _stats)
+        try:
+            _reader.start()
+        except OSError as e:
+            _release()
+            raise RuntimeError(f"IMU does not answer on I2C address 0x{config.IMU_I2C_ADDRESS:02X}: {e}") from e
+        _reader_error = None
+        _reader_stop.clear()
+        _reader_thread = threading.Thread(target=_read_loop, args=(_reader, _reader_stop), daemon=True)
+        _reader_thread.start()
 
 def _release():
     global _port, _reader, _edges
     if _edges:
-        _edges.close()
+        try:
+            _edges.close()
+        except OSError:
+            pass
         _edges = None
     if _port and _port.is_open:
         _port.close()
     _port = None
     _reader = None
 
+def close_imu_device():
+    """Lets go of the sensor (for a reconnect). A running recording is not touched: it gets its samples
+    again when the sensor is opened"""
+    global _reader_thread
+    with _lock:
+        _reader_stop.set()
+        thread, _reader_thread = _reader_thread, None
+        if thread:
+            thread.join(timeout=5)
+        _release()
+
 def close_imu_port():
     """Stops logging and the reader, then closes the port for clean shutdown"""
-    global _reader_thread
     stop_logging()
-    _reader_stop.set()
-    if _reader_thread:
-        _reader_thread.join()
-        _reader_thread = None
-    _release()
+    close_imu_device()
 
 def is_port_open() -> bool:
     return _port is not None and _port.is_open
@@ -418,56 +460,73 @@ def is_logging() -> bool:
     return _log_thread is not None
 
 def verify_connection():
-    """The sensor is opened and the reader is running"""
-    return is_port_open() and _reader_thread is not None and _reader_thread.is_alive()
+    """The sensor is opened, the reader runs and samples keep coming"""
+    reader = _reader
+    return (is_port_open() and _reader_thread is not None and _reader_thread.is_alive()
+            and reader is not None and reader.healthy())
 
 def get_stats() -> dict:
-    """Counters of the reader since the port was opened, and how the samples are timed"""
-    stats = dict(_reader.stats) if _reader else {}
+    """Counters since the server started, and how the samples are timed"""
+    stats = dict(_stats)
     stats.update(timing="edges" if _edges else "polling", timing_error=_edges_error,
-                 pm_qos=_qos.active, pm_qos_error=_qos.error, dropped_lines=_dropped_lines)
+                 pm_qos=_qos.active, pm_qos_error=_qos.error, dropped_lines=_dropped_lines,
+                 reader_error=_reader_error, log_error=_log_error)
     return stats
 
 def start_logging(project_path) -> int:
-    global _log_stop, _log_thread, _log_queue
+    global _log_stop, _log_thread, _log_queue, _log_pps_queue, _log_error
 
     if _port is None or not _port.is_open:
         raise RuntimeError("IMU port is not open")
 
     _qos.acquire()  # no deep C-states while recording
+    _log_error = None
     _log_queue = subscribe(maxsize=10000)
     pps_queue = queue.Queue(1000)
+    _log_pps_queue = pps_queue
     with _subscribers_lock:
         _pps_subscribers.add(pps_queue)
     _log_stop = threading.Event()
     stop, q = _log_stop, _log_queue
-    stats_before = dict(_reader.stats)
+    stats_before = dict(_stats)
+    dropped_before = _dropped_lines
     info = dict(odr_hz=_port.hz, range_g=_port.range_g, mg_per_count=_port.mg_per_count,
                 fifo_threshold=_port.fifo_threshold, columns=LOG_COLUMNS,
                 timing="edges" if _edges else "polling", timing_error=_edges_error)
 
     def _log():
-        reader, last_flush = _reader, time.monotonic()
-        with open(f"{project_path}/imu.csv", "w") as f, open(f"{project_path}/pps.csv", "w") as pps:
-            f.write(",".join(LOG_COLUMNS) + "\n")
-            pps.write("mono_ns,seqno\n")
-            # Keep draining after stop is requested so no queued line is lost
-            while not stop.is_set() or not q.empty():
-                try:
-                    ts, line = q.get(timeout=0.1)
-                    f.write(f"{ts},{line.decode()}\n")  # raw values, stored as they come
-                except queue.Empty:
-                    pass
-                while not pps_queue.empty():
-                    pps.write("%d,%d\n" % pps_queue.get_nowait())
-                if time.monotonic() - last_flush >= 1.0:
-                    f.flush()
-                    pps.flush()
-                    last_flush = time.monotonic()
-        counters = {k: reader.stats[k] - stats_before[k] for k in reader.stats}
-        with open(f"{project_path}/imu_info.json", "w") as f:
-            json.dump({**info, "counters": counters, "pm_qos": _qos.active, "pm_qos_error": _qos.error},
-                      f, indent=2)
+        global _log_error
+        last_flush = time.monotonic()
+        try:
+            with open(f"{project_path}/imu.csv", "w") as f, open(f"{project_path}/pps.csv", "w") as pps:
+                f.write(",".join(LOG_COLUMNS) + "\n")
+                pps.write("mono_ns,seqno\n")
+                # Keep draining after stop is requested so no queued line is lost
+                while not stop.is_set() or not q.empty():
+                    try:
+                        ts, line = q.get(timeout=0.1)
+                        f.write(f"{ts},{line.decode()}\n")  # raw values, stored as they come
+                    except queue.Empty:
+                        pass
+                    while not pps_queue.empty():
+                        pps.write("%d,%d\n" % pps_queue.get_nowait())
+                    if time.monotonic() - last_flush >= FSYNC_S:
+                        for file in (f, pps):
+                            file.flush()
+                            os.fsync(file.fileno())  # a power cut or a pulled stick loses seconds, not the recording
+                        last_flush = time.monotonic()
+        except (OSError, ValueError) as e:  # disk full, stick pulled out
+            _log_error = f"{type(e).__name__}: {e}"
+            events.record("imu", "storage_error", _log_error)
+            unsubscribe(q)
+        counters = {k: _stats.get(k, 0) - stats_before.get(k, 0) for k in _stats}
+        counters["dropped_lines"] = _dropped_lines - dropped_before
+        try:
+            with open(f"{project_path}/imu_info.json", "w") as f:
+                json.dump({**info, "counters": counters, "pm_qos": _qos.active, "pm_qos_error": _qos.error,
+                           "log_error": _log_error}, f, indent=2)
+        except OSError:
+            pass
 
     _log_thread = threading.Thread(target=_log, daemon=True)
 
@@ -482,12 +541,16 @@ def start_logging(project_path) -> int:
     return start_ns
 
 def stop_logging():
-    global _log_stop, _log_thread, _log_queue
-    if _log_thread and _reader:
-        _reader.finish()  # the newest samples are published before the logger stops
+    global _log_stop, _log_thread, _log_queue, _log_pps_queue
+    reader = _reader
+    if _log_thread and reader:
+        reader.finish()  # the newest samples are published before the logger stops
     if _log_queue:
         unsubscribe(_log_queue)
         _log_queue = None
+    if _log_pps_queue:
+        unsubscribe(_log_pps_queue)
+        _log_pps_queue = None
     if _log_stop:
         _log_stop.set()
     if _log_thread:

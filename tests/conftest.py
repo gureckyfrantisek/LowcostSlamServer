@@ -20,6 +20,12 @@ def simulated_hardware(monkeypatch, tmp_path):
     monkeypatch.setattr(imu, "open_edges", lambda: (None, "simulated"))
     monkeypatch.setattr(imu, "_qos", PmQos(str(tmp_path / "cpu_dma_latency"), 10))
     monkeypatch.setattr(config, "IMU_I2C_HZ", 400)
+    from app.core import events, gnss
+    monkeypatch.setattr(gnss, "RAWX_SILENT_S", 1e9)   # the simulated receiver sends no RAWX of its own
+    imu._stats.clear()                                  # counters run on across a test otherwise
+    gnss._stats.clear()
+    gnss._stats["frames"] = 0
+    events._recent.clear()
 
 
 @pytest.fixture

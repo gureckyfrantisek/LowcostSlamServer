@@ -8,28 +8,20 @@ from datetime import datetime
 _camera = None
 
 def open_camera():
-    # Global camera connection lives while the server lives
+    """One attempt to find and open the camera. Raises RuntimeError if there is none: the supervisor
+    (app/core/supervisor.py) tries again, so the server starts without a camera and picks it up when
+    it is plugged in"""
     global _camera
-    
-    for _ in range(5):
-        # This might need to be changed to match the sdk
-        discovery = camerasdk.DeviceDiscovery()
-        devices = discovery.get_available_devices()
 
-        if len(devices) == 0:
-            print("No cameras found, retrying in 5 seconds")
-            time.sleep(5)
-            continue
+    discovery = camerasdk.DeviceDiscovery()
+    devices = discovery.get_available_devices()
 
-        _camera = camerasdk.Camera(devices[0].info)
-        _camera.open()
+    if len(devices) == 0:
+        raise RuntimeError("no camera found")
 
-        # Break out of the loop if we found the camera
-        if _camera:
-            break
-    
-    if not _camera:
-        raise(RuntimeError("No camera found, shutting down."))
+    camera = camerasdk.Camera(devices[0].info)
+    camera.open()
+    _camera = camera
 
 def verify_connection():
     try:
@@ -49,11 +41,14 @@ def close_camera():
     # When we write to globals we must state it
     global _camera
 
-    if not verify_connection():
+    camera, _camera = _camera, None
+    if camera is None:
         return False
-    
-    _camera.close()
-    _camera = None
+
+    try:
+        camera.close()
+    except Exception as e:  # a camera that was pulled out cannot be closed politely
+        print(f"Closing the camera failed: {e}")
     return True
 
 def start_recording():

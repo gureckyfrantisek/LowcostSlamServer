@@ -1,10 +1,11 @@
 # GNSS connection and functions
 import logging
+import os
 import queue
 import struct
 import threading
 import time
-from app.core import config, i2c
+from app.core import config, events, i2c
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ _VALUE_BYTES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}  # key bits 28..30 -> value bytes
 _UBX_CFG_VALSET = (0x06, 0x8A)
 _LAYER_RAM = 0x01  # gone at a power cycle, so it is applied again at every start
 
+FSYNC_S = 2.0  # how often the log files are forced to the disk
+SILENT_S = 5.0  # a receiver that says nothing for this long is gone (it sends NMEA every second)
+RAWX_SILENT_S = 10.0  # one that stops sending the raw measurements forgot its settings (a power dip): configure it again
+
 _BYTES_AVAILABLE = 0xFD  # 2 bytes, big endian: how much output the receiver has waiting
 _MAX_CHUNK = 128  # a long read would hold the shared bus, and delay the IMU, for too long
 
@@ -42,6 +47,12 @@ _subscribers: dict[queue.Queue, tuple[frozenset[str], bool]] = {}
 _subscribers_lock = threading.Lock()
 _dropped_frames = 0
 _raw_error: str | None = None  # why the raw output (RAWX, time marks) could not be switched on
+_reader_error: str | None = None  # why the reader thread ended, if it did not end because it was told to
+_log_error: str | None = None  # why the log writer stopped, if the storage failed
+_last_data = 0.0  # when the receiver last sent something
+_last_rawx = 0.0  # when it last sent RXM-RAWX
+_stats = {"frames": 0}
+_lock = threading.RLock()  # open / close / reconnect
 
 _log_stop: threading.Event | None = None
 _log_thread: threading.Thread | None = None
@@ -60,6 +71,7 @@ class DdcPort:
         self.address = address
         self.poll_s = poll_s
         self.errors = 0  # failed transfers (NACK while the receiver is busy), retried on the next poll
+        self.consecutive_errors = 0  # in a row: the receiver is gone
         self._announced = 0
         try:
             self.bus = i2c.acquire(bus_path)
@@ -78,8 +90,10 @@ class DdcPort:
         try:
             high, low = self.bus.read_registers(self.address, _BYTES_AVAILABLE, 2)
             self._announced = (high << 8) | low
+            self.consecutive_errors = 0
         except OSError:
             self.errors += 1
+            self.consecutive_errors += 1
             self._announced = 0
         return self._announced
 
@@ -260,90 +274,126 @@ def unsubscribe(q: queue.Queue):
     with _subscribers_lock:
         _subscribers.pop(q, None)
 
-def _read_loop():
-    global _dropped_frames
+def _read_loop(port: DdcPort, stop: threading.Event):
+    global _dropped_frames, _reader_error, _last_data, _last_rawx
     parser = _FrameParser()
-    while not _reader_stop.is_set():
-        # Returns what the receiver has waiting, or nothing after the poll interval
-        chunk = _port.read(_port.in_waiting or 1)
-        if not chunk:
-            continue
-        ts, mono = time.time_ns(), time.monotonic_ns()  # timestamp at receipt, shared by all consumers
-        for frame_ts, kind, data in parser.feed(chunk, ts):
-            with _subscribers_lock:
-                subs = list(_subscribers.items())
-            for q, (kinds, with_mono) in subs:
-                if kind not in kinds:
-                    continue
-                try:
-                    q.put_nowait((frame_ts, kind, data, mono) if with_mono else (frame_ts, kind, data))
-                except queue.Full:
-                    _dropped_frames += 1  # slow consumer must never block the reader
+    try:
+        while not stop.is_set():
+            # Returns what the receiver has waiting, or nothing after the poll interval
+            chunk = port.read(port.in_waiting or 1)
+            if not chunk:
+                continue
+            ts, mono = time.time_ns(), time.monotonic_ns()  # timestamp at receipt, shared by all consumers
+            _last_data = time.monotonic()
+            for frame_ts, kind, data in parser.feed(chunk, ts):
+                _stats["frames"] += 1
+                if kind == UBX and data[2] == 0x02 and data[3] == 0x15:
+                    _last_rawx = time.monotonic()
+                with _subscribers_lock:
+                    subs = list(_subscribers.items())
+                for q, (kinds, with_mono) in subs:
+                    if kind not in kinds:
+                        continue
+                    try:
+                        q.put_nowait((frame_ts, kind, data, mono) if with_mono else (frame_ts, kind, data))
+                    except queue.Full:
+                        _dropped_frames += 1  # slow consumer must never block the reader
+    except Exception as e:  # a bug must not leave a silent server: the health check sees the dead thread
+        _reader_error = f"{type(e).__name__}: {e}"
+        log.exception("GNSS reader stopped")
 
 def open_gnss_port():
-    """Opens the GNSS receiver on the I2C bus and starts the reader thread"""
-    global _port, _reader_thread, _raw_error
-    if _port and _port.is_open:
-        return
-    _port = DdcPort(config.GNSS_I2C_BUS, config.GNSS_I2C_ADDRESS, config.GNSS_I2C_POLL_S)
-    try:
-        configure_receiver(_port, config.GNSS_RATE_HZ)
-        _raw_error = None
-    except (RuntimeError, OSError) as e:
-        _raw_error = str(e)
-        log.warning("GNSS raw output not available (%s): NMEA only, no post-processing", e)
-    _reader_stop.clear()
-    _reader_thread = threading.Thread(target=_read_loop, daemon=True)
-    _reader_thread.start()
+    """Opens the GNSS receiver on the I2C bus and starts the reader thread. Raises RuntimeError if
+    the receiver is not there. A running recording goes on: the subscribers stay"""
+    global _port, _reader_thread, _raw_error, _reader_error, _last_data, _last_rawx
+    with _lock:
+        if _port and _port.is_open:
+            return
+        _port = DdcPort(config.GNSS_I2C_BUS, config.GNSS_I2C_ADDRESS, config.GNSS_I2C_POLL_S)
+        try:
+            configure_receiver(_port, config.GNSS_RATE_HZ)
+            _raw_error = None
+        except (RuntimeError, OSError) as e:
+            _raw_error = str(e)
+            log.warning("GNSS raw output not available (%s): NMEA only, no post-processing", e)
+        _reader_error = None
+        _last_data = _last_rawx = time.monotonic()
+        _reader_stop.clear()
+        _reader_thread = threading.Thread(target=_read_loop, args=(_port, _reader_stop), daemon=True)
+        _reader_thread.start()
+
+def close_gnss_device():
+    """Lets go of the receiver (for a reconnect). A running recording is not touched"""
+    global _port, _reader_thread
+    with _lock:
+        _reader_stop.set()
+        thread, _reader_thread = _reader_thread, None
+        if thread:
+            thread.join(timeout=5)
+        if _port and _port.is_open:
+            _port.close()
+        _port = None
 
 def close_gnss_port():
     """Stops logging and the reader, then closes the port for clean shutdown"""
-    global _port, _reader_thread
     stop_logging()
-    _reader_stop.set()
-    if _reader_thread:
-        _reader_thread.join()
-        _reader_thread = None
-    if _port and _port.is_open:
-        _port.close()
-    _port = None
+    close_gnss_device()
 
 def get_stats() -> dict:
-    return dict(errors=_port.errors if _port else 0, dropped_frames=_dropped_frames,
-                raw_output=_raw_error is None and _port is not None, raw_output_error=_raw_error)
+    return dict(_stats, errors=_port.errors if _port else 0, dropped_frames=_dropped_frames,
+                raw_output=_raw_error is None and _port is not None, raw_output_error=_raw_error,
+                reader_error=_reader_error, log_error=_log_error)
 
 def verify_connection():
-    """The receiver is opened and answering on the bus"""
-    return _port is not None and _port.is_open
+    """The receiver is opened, the reader runs, the bus answers and the receiver keeps talking"""
+    port = _port
+    now = time.monotonic()
+    return (port is not None and port.is_open and _reader_thread is not None and _reader_thread.is_alive()
+            and port.consecutive_errors < 50 and now - _last_data < SILENT_S
+            and (_raw_error is not None or now - _last_rawx < RAWX_SILENT_S))
 
 def start_logging(project_path) -> int:
     """Logs the raw UBX stream untouched to gnss.ubx, plus gnss_index.csv
     mapping every frame to the host clock"""
-    global _log_stop, _log_thread, _log_queue
+    global _log_stop, _log_thread, _log_queue, _log_error
 
     if _port is None or not _port.is_open:
         raise RuntimeError("GNSS port is not open")
 
+    _log_error = None
     _log_queue = subscribe(kinds=[UBX], maxsize=10000, with_mono=True)
     _log_stop = threading.Event()
     stop, q = _log_stop, _log_queue
+    dropped_before = _dropped_frames
 
     def _log():
-        with open(f"{project_path}/gnss.ubx", "wb") as raw, \
-             open(f"{project_path}/gnss_index.csv", "w") as index:
-            index.write("timestamp_ns,mono_ns,offset,length,ubx_class,ubx_id\n")
-            offset = 0
-            # Keep draining after stop is requested so no queued frame is lost
-            while not stop.is_set() or not q.empty():
-                try:
-                    ts, _, frame, mono = q.get(timeout=0.1)
-                except queue.Empty:
-                    raw.flush()
-                    index.flush()
-                    continue
-                raw.write(frame)
-                index.write(f"{ts},{mono},{offset},{len(frame)},{frame[2]},{frame[3]}\n")
-                offset += len(frame)
+        global _log_error
+        last_flush = time.monotonic()
+        try:
+            with open(f"{project_path}/gnss.ubx", "wb") as raw, \
+                 open(f"{project_path}/gnss_index.csv", "w") as index:
+                index.write("timestamp_ns,mono_ns,offset,length,ubx_class,ubx_id\n")
+                offset = 0
+                # Keep draining after stop is requested so no queued frame is lost
+                while not stop.is_set() or not q.empty():
+                    try:
+                        ts, _, frame, mono = q.get(timeout=0.1)
+                        raw.write(frame)
+                        index.write(f"{ts},{mono},{offset},{len(frame)},{frame[2]},{frame[3]}\n")
+                        offset += len(frame)
+                    except queue.Empty:
+                        pass
+                    if time.monotonic() - last_flush >= FSYNC_S:
+                        for file in (raw, index):
+                            file.flush()
+                            os.fsync(file.fileno())  # a power cut or a pulled stick loses seconds, not the recording
+                        last_flush = time.monotonic()
+        except (OSError, ValueError) as e:  # disk full, stick pulled out
+            _log_error = f"{type(e).__name__}: {e}"
+            events.record("gnss", "storage_error", _log_error)
+            unsubscribe(q)
+        if _dropped_frames > dropped_before:
+            events.record("gnss", "dropped", f"{_dropped_frames - dropped_before} frames did not fit the queue")
 
     _log_thread = threading.Thread(target=_log, daemon=True)
 

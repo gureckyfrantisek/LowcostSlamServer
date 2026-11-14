@@ -1,26 +1,23 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.routers import camera, imu, gnss, common, websocket
-from app.core.camera import open_camera, close_camera
-from app.core.gnss import open_gnss_port, close_gnss_port
-from app.core.imu import open_imu_port, close_imu_port
+from app.core import common as measurement, supervisors
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Opening all needs to be more robust
+    # The server comes up with whatever is connected; the rest is connected when it appears
     open_all()
     yield   # The server runs int here
     close_all()
 
 def open_all():
-    open_camera()
-    open_gnss_port()
-    open_imu_port()
+    supervisors.start_all()
 
 def close_all():
-    close_camera()
-    close_gnss_port()
-    close_imu_port()
+    # A service stop in the middle of a measurement closes it properly (files, meta.json)
+    if measurement.get_recording_state()["active"]:
+        measurement.stop_measurement(measurement.get_recording_state()["project"])
+    supervisors.stop_all()
 
 app = FastAPI(title="Lowcost Slam API", lifespan=lifespan)
 

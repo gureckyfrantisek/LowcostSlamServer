@@ -143,3 +143,16 @@ def test_projects_are_found_on_the_stick_first(hw, monkeypatch):
                                       (".hidden", False), (" x", False), ("x" * 101, False), ("a\0b", False)])
 def test_project_names_are_one_plain_folder_name(name, ok):
     assert storage.valid_project_name(name) is ok
+
+
+def test_a_local_folder_that_does_not_exist_yet_has_the_room_of_its_disk(hw, tmp_path):
+    missing = tmp_path / "fresh" / "system" / "measurements"
+    assert not missing.exists()
+    assert storage.free_bytes(str(missing)) == storage.free_bytes(str(tmp_path)) > 0
+
+
+def test_a_fresh_system_does_not_refuse_the_first_recording(hw, monkeypatch, tmp_path):
+    hw.mounts.write_text("/dev/mmcblk2p2 / ext4 rw 0 0\n")
+    monkeypatch.setattr(config, "LOCAL_DATA_PATH", str(tmp_path / "not" / "there" / "yet"))
+    status = storage.status()
+    assert status["level"] == "ok" and status["free_mb"] > 0

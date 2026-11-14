@@ -14,6 +14,8 @@ def get_status_route():
 
     all_connected = camera_ok and gnss_ok and imu_ok
     storage_status = storage.status()
+    recording = get_recording_state()
+    warnings = recording["problems"] + ([storage_status["message"]] if storage_status["level"] != "ok" else [])
 
     return responses.JSONResponse(
         status_code=200 if all_connected else 500,
@@ -24,8 +26,11 @@ def get_status_route():
                 "gnss":   "ok" if gnss_ok   else "not connected",
                 "imu":    "ok" if imu_ok     else "not connected",
             },
+            "details": get_sensor_states(),
+            "recording": recording,
             "storage": storage_status,
-            "warnings": [storage_status["message"]] if storage_status["level"] != "ok" else [],
+            "warnings": warnings,
+            "events": events.recent(10),
         }
     )
 
@@ -69,17 +74,32 @@ def start_measurement_route(project_name):
                 content={"status": "storage full", "storage": storage.status()}
             )
 
+        case 7:
+            return responses.JSONResponse(
+                status_code=500,
+                content={"status": "failed to start", "reason": get_start_error()}
+            )
+
+        case 6:
+            missing = {name: state["detail"] for name, state in get_sensor_states().items() if state["state"] != "ok"}
+            return responses.JSONResponse(
+                status_code=503,
+                content={"status": "sensors not ready: " + ", ".join(missing), "missing": missing}
+            )
+
 @router.post("/stop")
 def stop_measurement_route(project_name):
-    if not stop_measurement(project_name):
+    problems = stop_measurement(project_name)
+    if problems is False:
         return responses.JSONResponse(
             status_code=500,
             content={"status": "couldn't stop"}
         )
 
+    # Stopped, but something went wrong during the measurement: the app should tell the user
     return responses.JSONResponse(
         status_code=200,
-        content={"status": "stopped"}
+        content={"status": "stopped", "warnings": problems}
     )
 
 @router.get("/projects")

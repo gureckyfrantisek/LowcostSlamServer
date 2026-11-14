@@ -78,6 +78,11 @@ def _writable(path: str) -> bool:
 
 
 def free_bytes(path: str) -> int:
+    """Free space of the disk the folder is (or would be) on: a folder that does not exist yet, like the
+    local data folder of a fresh system, counts as the nearest folder above it that does"""
+    path = os.path.abspath(path)
+    while not os.path.exists(path) and os.path.dirname(path) != path:
+        path = os.path.dirname(path)
     try:
         return shutil.disk_usage(path).free
     except OSError:
@@ -131,7 +136,7 @@ def valid_project_name(name: str) -> bool:
 def status() -> dict:
     """Where recordings go, how much room is left and whether that is a problem"""
     root = data_root()
-    free = free_bytes(root if os.path.isdir(root) else os.path.dirname(root) or "/")
+    free = free_bytes(root)
     hour = bytes_per_hour()
     lvl = level(free)
     sticks = usb_mounts()
