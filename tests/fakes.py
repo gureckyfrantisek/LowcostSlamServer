@@ -6,6 +6,34 @@ import threading
 from smbus2 import i2c_msg
 
 
+class FakeEdges:
+    """Stands in for imu.GpioEdges: edges are pushed by the test, the fd wakes the reader"""
+
+    def __init__(self):
+        import os
+        self.fd, self._wake = os.pipe()
+        self._edges = []
+        self.closed = False
+
+    def push(self, line, ns, seqno):
+        import os
+        from app.core.imu import Edge
+        self._edges.append(Edge(line, ns, seqno))
+        os.write(self._wake, b"x")
+
+    def read(self):
+        import os
+        os.read(self.fd, 4096)
+        edges, self._edges = self._edges, []
+        return edges
+
+    def close(self):
+        import os
+        self.closed = True
+        os.close(self.fd)
+        os.close(self._wake)
+
+
 class FakeBus:
     """Stands in for smbus2.SMBus: i2c_rdwr, write_byte_data, close"""
 
@@ -15,29 +43,64 @@ class FakeBus:
         self.gnss_address = 0x42
         self.who_am_i = 0x33
         self.registers = {}            # LIS3DH registers written by the driver
-        self.samples = []              # LIS3DH output, (x, y, z) 12 bit counts, popped when read
+        self.fifo = []                 # LIS3DH FIFO, (x, y, z) 12 bit counts, oldest first
+        self.overrun = False           # the FIFO was full when a sample arrived
         self.stream = bytearray()      # ZED-F9P output waiting to be read
         self.fail = 0                  # the next N transfers raise OSError (NACK)
         self.absent = set()            # addresses that never answer
         self.closed = False
         self.transfers = 0
+        self.valset = None             # settings the receiver was given: {key: value}
+        self.ack = "ack"               # how the receiver answers a configuration: "ack", "nak" or "silent"
 
     # --- what the sensors do -------------------------------------------------------------------
+    def produce(self, samples):
+        """The sensor makes samples; a full FIFO drops the oldest and flags the overrun"""
+        with self.lock:
+            for sample in samples:
+                if len(self.fifo) >= 32:
+                    del self.fifo[0]
+                    self.overrun = True
+                self.fifo.append(tuple(sample))
+
     def _lis_read(self, register, length):
         reg = register & 0x7F
         if reg == 0x0F:
             return bytes([self.who_am_i])
-        if reg == 0x27:  # status + OUT_X_L..OUT_Z_H
-            if self.samples:
-                x, y, z = self.samples.pop(0)
-                return bytes([0x08]) + struct.pack("<hhh", x << 4, y << 4, z << 4)[:length - 1]
-            return bytes([0x00]) + bytes(6)[:length - 1]
+        if reg == 0x2F:  # FIFO_SRC
+            n = len(self.fifo)
+            return bytes([(0x40 if self.overrun and n else 0) | (0x20 if n == 0 else 0) | (n & 0x1F)])
+        if reg == 0x28:  # OUT_X_L ... : pops one sample per 6 bytes
+            out = b""
+            for _ in range(length // 6):
+                x, y, z = self.fifo.pop(0) if self.fifo else (0, 0, 0)
+                out += struct.pack("<hhh", x << 4, y << 4, z << 4)
+            if not self.fifo:
+                self.overrun = False
+            return out
         return bytes(length)
 
     def _gnss_read_register(self, register, length):
         if register == 0xFD:
             return struct.pack(">H", len(self.stream))[:length]
         return b"\xff" * length
+
+    def _gnss_write(self, data):
+        """A UBX command to the receiver. Only CFG-VALSET is understood"""
+        assert data[:2] == bytes([0xB5, 0x62]), "not a UBX frame"
+        cls, ident = data[2], data[3]
+        length = struct.unpack("<H", data[4:6])[0]
+        payload = data[6:6 + length]
+        if (cls, ident) == (0x06, 0x8A):
+            values, i = {}, 4
+            while i < len(payload):
+                key = struct.unpack_from("<I", payload, i)[0]
+                size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}[key >> 28 & 7]
+                values[key] = int.from_bytes(payload[i + 4:i + 4 + size], "little")
+                i += 4 + size
+            self.valset = values
+            if self.ack != "silent":
+                self.stream += ubx(0x05, 0x01 if self.ack == "ack" else 0x00, bytes([cls, ident]))
 
     def _gnss_read_stream(self, length):
         data = bytes(self.stream[:length])
@@ -59,10 +122,13 @@ class FakeBus:
                 length = read.len
                 data = (self._lis_read(register, length) if address == self.lis_address
                         else self._gnss_read_register(register, length))
-            else:
+            elif msgs[0].flags & 1:
                 read = msgs[0]
                 length = read.len
                 data = self._gnss_read_stream(length)
+            else:
+                self._gnss_write(bytes(msgs[0]))
+                return
             ctypes.memmove(read.buf, data, length)
 
     def write_byte_data(self, address, register, value):
@@ -93,3 +159,11 @@ def ubx(cls: int, ident: int, payload: bytes = b"") -> bytes:
         a = (a + byte) & 0xFF
         b = (b + a) & 0xFF
     return b"\xb5\x62" + body + bytes([a, b])
+
+
+def trickle(bus, batches, size=8, gap=0.06, first=0):
+    """The sensor keeps making samples: `batches` batches of `size` samples, `gap` seconds apart"""
+    import time
+    for b in range(batches):
+        bus.produce([(first + b * size + i, 0, 0) for i in range(size)])
+        time.sleep(gap)

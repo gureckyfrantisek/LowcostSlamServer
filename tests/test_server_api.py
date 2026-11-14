@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core import camera, config, gnss, imu
-from tests.fakes import nmea
+from tests.fakes import nmea, trickle
 
 
 @pytest.fixture
@@ -34,13 +34,14 @@ def test_status_is_ready_with_all_sensors(client):
 
 def test_measurement_needs_no_calibration_and_stores_raw_data(client, bus, tmp_path):
     assert client.post("/start", params={"project_name": "p1"}).status_code == 200
-    bus.samples = [(5, 6, 1000)] * 5
+    bus.produce([(5, 6, 1000)] * 5)
+    time.sleep(0.15)
     bus.stream += nmea("GNGLL,4807.038,N,01131.000,E,123519,A")
     time.sleep(0.3)
     assert client.post("/stop", params={"project_name": "p1"}).status_code == 200
     project = tmp_path / "p1"
     rows = (project / "imu.csv").read_text().splitlines()
-    assert rows[0] == "ts,aX,aY,aZ" and rows[1].endswith(",5,6,1000")
+    assert rows[0] == "ts,mono_ns,aX,aY,aZ" and rows[1].endswith(",5,6,1000")
     assert "camera_files" in json.loads((project / "meta.json").read_text())
 
 
@@ -59,9 +60,8 @@ def test_failed_camera_start_leaves_no_files(client, monkeypatch, tmp_path):
 
 
 def test_imu_websocket_streams_samples(client, bus):
-    bus.samples = []
     with client.websocket_connect("/ws/imu") as ws:
-        bus.samples = [(7, 8, 9)]
+        trickle(bus, 3, size=8)
         message = ws.receive_text()
-    ts, rest = message.split(",", 1)
-    assert rest == "7,8,9" and int(ts) > 0
+    ts, mono, x, y, z = message.split(",")
+    assert (x, y, z) == ("0", "0", "0") and int(ts) > 0 and int(mono) > 0

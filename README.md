@@ -39,6 +39,13 @@ Check the wiring with `/usr/sbin/i2cdetect -y -r <N>`: the F9P answers at `0x42`
 
 The IMU data is stored raw (12 bit counts, 1 mg per count at +-2 g), without calibration or correction.
 
+Every IMU sample gets a time from the kernel time stamp of the sensor's FIFO interrupt (header pin 29), and the
+PPS of the GNSS receiver (pin 7) is logged on the same clock, so the samples can be mapped to GPS time afterwards.
+While recording, the CPUs are kept out of the deep sleep states (needs the `gpio` group and the udev rule of the
+setup script). Without the GPIO edges the server still works, with times good to about a sample period. A
+recording writes `imu.csv`, `pps.csv`, `gnss.ubx`, `gnss_index.csv` and `imu_info.json`; see [docs/timing.md](docs/timing.md)
+for the formats, the measured accuracy and the data volume (16 MB per hour at 100 Hz).
+
 The server needs sudo permissions for USB port access (the camera).
 ```bash
 sudo .venv/bin/uvicorn app.main:app --reload

@@ -12,6 +12,16 @@ except Exception:
     sys.modules["sdk"], sys.modules["sdk.camerasdk"] = sdk, sdk.camerasdk
 
 
+@pytest.fixture(autouse=True)
+def simulated_hardware(monkeypatch, tmp_path):
+    """No real GPIO edges, no real PM QoS request, a fast sensor so the polling reader is quick"""
+    from app.core import config, imu
+    from app.core.timing import PmQos
+    monkeypatch.setattr(imu, "open_edges", lambda: (None, "simulated"))
+    monkeypatch.setattr(imu, "_qos", PmQos(str(tmp_path / "cpu_dma_latency"), 10))
+    monkeypatch.setattr(config, "IMU_I2C_HZ", 400)
+
+
 @pytest.fixture
 def bus(monkeypatch):
     """A fake I2C bus behind app.core.i2c"""

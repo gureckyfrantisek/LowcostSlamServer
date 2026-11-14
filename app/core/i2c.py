@@ -37,6 +37,12 @@ class Bus:
             self._smbus.i2c_rdwr(read)
         return bytes(read)
 
+    def write_stream(self, address: int, data: bytes):
+        """Plain write without a register address (a command to a u-blox receiver)"""
+        write = i2c_msg.write(address, list(data))
+        with self._lock:
+            self._smbus.i2c_rdwr(write)
+
     def close(self):
         self._smbus.close()
 

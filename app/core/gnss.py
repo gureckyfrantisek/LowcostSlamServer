@@ -1,14 +1,32 @@
 # GNSS connection and functions
+import logging
 import queue
+import struct
 import threading
 import time
 from app.core import config, i2c
+
+log = logging.getLogger(__name__)
 
 NMEA = "nmea"
 UBX = "ubx"
 
 _UBX_MAX_PAYLOAD = 4096
 _NMEA_MAX_LEN = 100
+
+# u-blox configuration keys (F9 interface description). The raw measurements, the time marks of the
+# IMU interrupt (the IMU INT1 line is wired to the receiver too) and the PPS on the GPS time grid
+# are what the post-processing needs; the NMEA output stays as it is.
+_CFG_RATE_MEAS = 0x30210001             # U2: ms between measurements
+_CFG_RATE_NAV = 0x30210002              # U2: measurements per navigation solution
+_CFG_MSGOUT_RXM_RAWX_I2C = 0x209102A4   # U1: output RXM-RAWX every n-th epoch on I2C
+_CFG_MSGOUT_RXM_SFRBX_I2C = 0x20910231
+_CFG_MSGOUT_TIM_TM2_I2C = 0x20910178
+_CFG_MSGOUT_TIM_TP_I2C = 0x2091017D
+_CFG_TP_TIMEGRID_TP1 = 0x2005000C       # 0 = UTC, 1 = GPS
+_VALUE_BYTES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}  # key bits 28..30 -> value bytes
+_UBX_CFG_VALSET = (0x06, 0x8A)
+_LAYER_RAM = 0x01  # gone at a power cycle, so it is applied again at every start
 
 _BYTES_AVAILABLE = 0xFD  # 2 bytes, big endian: how much output the receiver has waiting
 _MAX_CHUNK = 128  # a long read would hold the shared bus, and delay the IMU, for too long
@@ -20,9 +38,10 @@ _reader_thread: threading.Thread | None = None
 # A single reader thread owns the receiver's output, splits the byte stream
 # into frames and fans each timestamped frame out to every subscriber queue
 # whose `kinds` filter matches.
-_subscribers: dict[queue.Queue, frozenset[str]] = {}
+_subscribers: dict[queue.Queue, tuple[frozenset[str], bool]] = {}
 _subscribers_lock = threading.Lock()
 _dropped_frames = 0
+_raw_error: str | None = None  # why the raw output (RAWX, time marks) could not be switched on
 
 _log_stop: threading.Event | None = None
 _log_thread: threading.Thread | None = None
@@ -79,10 +98,58 @@ class DdcPort:
         self._announced -= n
         return data
 
+    def write(self, data: bytes):
+        """Sends a command to the receiver"""
+        self.bus.write_stream(self.address, data)
+
     def close(self):
         if self.is_open:
             self.is_open = False
             i2c.release(self.bus)
+
+
+def ubx_frame(msg_class: int, msg_id: int, payload: bytes = b"") -> bytes:
+    body = bytes([msg_class, msg_id]) + struct.pack("<H", len(payload)) + payload
+    ck_a = ck_b = 0
+    for byte in body:
+        ck_a = (ck_a + byte) & 0xFF
+        ck_b = (ck_b + ck_a) & 0xFF
+    return b"\xb5\x62" + body + bytes([ck_a, ck_b])
+
+
+def valset_payload(values: dict[int, int]) -> bytes:
+    """UBX-CFG-VALSET payload: version 0, the RAM layer, then the key/value pairs"""
+    out = struct.pack("<BBH", 0, _LAYER_RAM, 0)
+    for key, value in values.items():
+        out += struct.pack("<I", key) + int(value).to_bytes(_VALUE_BYTES[key >> 28 & 7], "little")
+    return out
+
+
+def receiver_settings(rate_hz: int) -> dict[int, int]:
+    return {
+        _CFG_RATE_MEAS: round(1000 / rate_hz),
+        _CFG_RATE_NAV: max(1, round(rate_hz)),  # a position fix at about 1 Hz
+        _CFG_MSGOUT_RXM_RAWX_I2C: 1,
+        _CFG_MSGOUT_RXM_SFRBX_I2C: 1,
+        _CFG_MSGOUT_TIM_TM2_I2C: 1,
+        _CFG_MSGOUT_TIM_TP_I2C: 1,
+        _CFG_TP_TIMEGRID_TP1: 1,  # PPS and time marks on the GPS time grid
+    }
+
+
+def configure_receiver(port: DdcPort, rate_hz: int, timeout_s: float = 3.0):
+    """Switches the raw output on. Raises RuntimeError when the receiver rejects it or does not answer"""
+    port.write(ubx_frame(*_UBX_CFG_VALSET, valset_payload(receiver_settings(rate_hz))))
+    parser = _FrameParser()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        chunk = port.read(port.in_waiting or 1)
+        for _, kind, frame in parser.feed(chunk, 0):
+            if kind == UBX and frame[2] == 0x05 and frame[6:8] == bytes(_UBX_CFG_VALSET):  # UBX-ACK-ACK / NAK
+                if frame[3] == 0x01:
+                    return
+                raise RuntimeError("the receiver rejected the raw output settings")
+    raise RuntimeError("the receiver did not acknowledge the raw output settings")
 
 
 def _ubx_checksum_ok(frame: bytes) -> bool:
@@ -175,16 +242,18 @@ class _FrameParser:
         self._start_ts = None
 
 
-def subscribe(kinds: list[str] | None = None, maxsize: int = 100) -> queue.Queue:
+def subscribe(kinds: list[str] | None = None, maxsize: int = 100, with_mono: bool = False) -> queue.Queue:
     """Returns a queue receiving (timestamp_ns, kind, frame_bytes) for every
-    frame of the requested kinds, e.g. [NMEA], [UBX] or [NMEA, UBX] (default)"""
+    frame of the requested kinds, e.g. [NMEA], [UBX] or [NMEA, UBX] (default).
+    With_mono adds a fourth value, the CLOCK_MONOTONIC time of the read that completed the frame:
+    the clock of the PPS edges, so a PPS second can be labelled with the GPS time of the frame"""
     if kinds is None:
         kinds = [NMEA, UBX]
     elif isinstance(kinds, str):
         kinds = [kinds]  # frozenset("ubx") would split into characters
     q = queue.Queue(maxsize)
     with _subscribers_lock:
-        _subscribers[q] = frozenset(kinds)
+        _subscribers[q] = (frozenset(kinds), with_mono)
     return q
 
 def unsubscribe(q: queue.Queue):
@@ -199,24 +268,30 @@ def _read_loop():
         chunk = _port.read(_port.in_waiting or 1)
         if not chunk:
             continue
-        ts = time.time_ns()  # timestamp at receipt, shared by all consumers
+        ts, mono = time.time_ns(), time.monotonic_ns()  # timestamp at receipt, shared by all consumers
         for frame_ts, kind, data in parser.feed(chunk, ts):
             with _subscribers_lock:
                 subs = list(_subscribers.items())
-            for q, kinds in subs:
+            for q, (kinds, with_mono) in subs:
                 if kind not in kinds:
                     continue
                 try:
-                    q.put_nowait((frame_ts, kind, data))
+                    q.put_nowait((frame_ts, kind, data, mono) if with_mono else (frame_ts, kind, data))
                 except queue.Full:
                     _dropped_frames += 1  # slow consumer must never block the reader
 
 def open_gnss_port():
     """Opens the GNSS receiver on the I2C bus and starts the reader thread"""
-    global _port, _reader_thread
+    global _port, _reader_thread, _raw_error
     if _port and _port.is_open:
         return
     _port = DdcPort(config.GNSS_I2C_BUS, config.GNSS_I2C_ADDRESS, config.GNSS_I2C_POLL_S)
+    try:
+        configure_receiver(_port, config.GNSS_RATE_HZ)
+        _raw_error = None
+    except (RuntimeError, OSError) as e:
+        _raw_error = str(e)
+        log.warning("GNSS raw output not available (%s): NMEA only, no post-processing", e)
     _reader_stop.clear()
     _reader_thread = threading.Thread(target=_read_loop, daemon=True)
     _reader_thread.start()
@@ -233,6 +308,10 @@ def close_gnss_port():
         _port.close()
     _port = None
 
+def get_stats() -> dict:
+    return dict(errors=_port.errors if _port else 0, dropped_frames=_dropped_frames,
+                raw_output=_raw_error is None and _port is not None, raw_output_error=_raw_error)
+
 def verify_connection():
     """The receiver is opened and answering on the bus"""
     return _port is not None and _port.is_open
@@ -245,25 +324,25 @@ def start_logging(project_path) -> int:
     if _port is None or not _port.is_open:
         raise RuntimeError("GNSS port is not open")
 
-    _log_queue = subscribe(kinds=[UBX], maxsize=10000)
+    _log_queue = subscribe(kinds=[UBX], maxsize=10000, with_mono=True)
     _log_stop = threading.Event()
     stop, q = _log_stop, _log_queue
 
     def _log():
         with open(f"{project_path}/gnss.ubx", "wb") as raw, \
              open(f"{project_path}/gnss_index.csv", "w") as index:
-            index.write("timestamp_ns,offset,length,ubx_class,ubx_id\n")
+            index.write("timestamp_ns,mono_ns,offset,length,ubx_class,ubx_id\n")
             offset = 0
             # Keep draining after stop is requested so no queued frame is lost
             while not stop.is_set() or not q.empty():
                 try:
-                    ts, _, frame = q.get(timeout=0.1)
+                    ts, _, frame, mono = q.get(timeout=0.1)
                 except queue.Empty:
                     raw.flush()
                     index.flush()
                     continue
                 raw.write(frame)
-                index.write(f"{ts},{offset},{len(frame)},{frame[2]},{frame[3]}\n")
+                index.write(f"{ts},{mono},{offset},{len(frame)},{frame[2]},{frame[3]}\n")
                 offset += len(frame)
 
     _log_thread = threading.Thread(target=_log, daemon=True)
