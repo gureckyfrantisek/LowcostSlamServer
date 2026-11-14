@@ -8,7 +8,7 @@ load_dotenv()
 
 # Config variables
 LOCAL_DATA_PATH = LOCAL_DATA_PATH = os.path.expanduser("~/measurements") if not os.getenv('LOCAL_DATA_PATH') else os.getenv('LOCAL_DATA_PATH')
-BASE_USB_PATH = f"/media/{getuser()}" if not os.getenv('BASE_USB_PATH') else os.getenv('BASE_USB_PATH')
+BASE_USB_PATH = os.getenv('BASE_USB_PATH') or "/media/usb"  # where the udev rule of deploy/ mounts the sticks (sticks mounted elsewhere are found by their USB device)
 
 # I2C settings
 def _i2c_bus(value):

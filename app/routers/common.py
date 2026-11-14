@@ -13,6 +13,7 @@ def get_status_route():
     imu_ok    = not (status & 1)
 
     all_connected = camera_ok and gnss_ok and imu_ok
+    storage_status = storage.status()
 
     return responses.JSONResponse(
         status_code=200 if all_connected else 500,
@@ -22,7 +23,9 @@ def get_status_route():
                 "camera": "ok" if camera_ok else "not connected",
                 "gnss":   "ok" if gnss_ok   else "not connected",
                 "imu":    "ok" if imu_ok     else "not connected",
-            }
+            },
+            "storage": storage_status,
+            "warnings": [storage_status["message"]] if storage_status["level"] != "ok" else [],
         }
     )
 
@@ -32,9 +35,14 @@ def start_measurement_route(project_name):
     
     match response:
         case True:
+            storage_status = storage.status()
             return responses.JSONResponse(
                 status_code=200,
-                content={"status": "started"}
+                content={
+                    "status": "started",
+                    "storage": storage_status,
+                    "warnings": [storage_status["message"]] if storage_status["level"] != "ok" else [],
+                }
             )
         
         case 1:
@@ -47,6 +55,18 @@ def start_measurement_route(project_name):
             return responses.JSONResponse(
                 status_code=500,
                 content={"status": "failed to start camera"}
+            )
+
+        case 4:
+            return responses.JSONResponse(
+                status_code=400,
+                content={"status": "invalid project name"}
+            )
+
+        case 5:
+            return responses.JSONResponse(
+                status_code=507,
+                content={"status": "storage full", "storage": storage.status()}
             )
 
 @router.post("/stop")

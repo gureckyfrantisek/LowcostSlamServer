@@ -51,6 +51,18 @@ The server needs sudo permissions for USB port access (the camera).
 sudo .venv/bin/uvicorn app.main:app --reload
 ```
 
+### USB stick
+Recordings go to a USB stick when one is mounted (in the `LowcostSlam` folder of the stick), else to
+`~/measurements` (`LOCAL_DATA_PATH`). Install the udev rule once and any stick (FAT, exFAT, NTFS, ext4) is mounted under
+`/media/usb/<name>` when it is plugged in, and unmounted by systemd when it is pulled out:
+```bash
+sudo cp deploy/99-usb-automount.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+```
+One hour of IMU and GNSS logging takes about 23 MB at the default rates (100 Hz IMU, 1 Hz GNSS; the video stays on the
+camera card). `/status` and `/start` report the room left and warn when less than 3 hours of recording fit; `/start` is
+refused when less than 10 minutes fit. `/projects` lists the projects of the stick and of the local disk, and
+`/download` copies a local project to the stick (a project recorded on the stick is already there).
+
 ### Tests
 The sensors are simulated, so no hardware is needed for the sensor tests:
 ```bash

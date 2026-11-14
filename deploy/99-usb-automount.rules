@@ -1,0 +1,20 @@
+# Mounts every USB stick (a partition, or a stick formatted without a partition table) under
+# /media/usb/<kernel name>, e.g. /media/usb/sda1, as soon as it is plugged in. The server records on
+# it when one is mounted (app/core/storage.py). systemd unmounts it when the stick is pulled out.
+# Installed to /etc/udev/rules.d/ by the install script.
+#
+# FAT and exFAT have no owners, so everybody may write; the sticks are mounted without access times
+# and FAT with the write cache flushed, so a pulled stick loses as little as possible.
+
+ACTION!="add", GOTO="usb_automount_end"
+SUBSYSTEM!="block", GOTO="usb_automount_end"
+ENV{ID_BUS}!="usb", GOTO="usb_automount_end"
+ENV{DEVTYPE}!="partition|disk", GOTO="usb_automount_end"
+ENV{ID_FS_USAGE}!="filesystem", GOTO="usb_automount_end"
+
+ENV{ID_FS_TYPE}=="vfat", RUN+="/usr/bin/systemd-mount --no-block --collect -o noatime,flush,umask=000 /dev/%k /media/usb/%k", GOTO="usb_automount_end"
+ENV{ID_FS_TYPE}=="exfat", RUN+="/usr/bin/systemd-mount --no-block --collect -o noatime,umask=000 /dev/%k /media/usb/%k", GOTO="usb_automount_end"
+ENV{ID_FS_TYPE}=="ntfs", RUN+="/usr/bin/systemd-mount --no-block --collect -t ntfs3 -o noatime,umask=000 /dev/%k /media/usb/%k", GOTO="usb_automount_end"
+RUN+="/usr/bin/systemd-mount --no-block --collect -o noatime /dev/%k /media/usb/%k"
+
+LABEL="usb_automount_end"

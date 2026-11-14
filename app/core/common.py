@@ -5,7 +5,7 @@ import json
 import shutil
 from dataclasses import dataclass
 from typing import Optional
-from app.core import camera, config, gnss, imu
+from app.core import camera, config, gnss, imu, storage
 
 # Only a shortcut to if we're recording or not
 _measurement = False
@@ -50,8 +50,16 @@ def start_measurement(project_name):
     if _measurement:
         return 1
 
+    if not storage.valid_project_name(project_name):
+        return 4
+
+    # Refuse before anything starts when there is no room for even a short recording
+    existing = storage.find_project_path(project_name)
+    if not existing and storage.level(storage.free_bytes(storage.data_root())) == "full":
+        return 5
+
     # Remember what existed before, so a failed start can be undone cleanly
-    project_path = os.path.join(config.LOCAL_DATA_PATH, project_name)
+    project_path = existing or os.path.join(storage.data_root(), project_name)
     local_files_before = set(os.listdir(project_path)) if os.path.isdir(project_path) else None
     camera_files_before = camera.get_camera_files_list()
 
@@ -182,12 +190,17 @@ def download_project_data(project_name, cleanup=False):
     if not usb_path:
         return 2
 
+    # The project may have been recorded on the stick already: then there is nothing to copy, and
+    # nothing to clean up afterwards (the stick holds the only copy)
+    on_usb = os.path.realpath(local_path) == os.path.realpath(usb_path)
+
     # Copy local data to USB
-    try:
-        shutil.copytree(local_path, usb_path, dirs_exist_ok=True)
-    except Exception as e:
-        print(f"Copy failed: {e}")
-        return 3
+    if not on_usb:
+        try:
+            shutil.copytree(local_path, usb_path, dirs_exist_ok=True)
+        except Exception as e:
+            print(f"Copy failed: {e}")
+            return 3
 
     # Get camera file names from meta.json
     meta_path = os.path.join(local_path, "meta.json")
@@ -208,8 +221,9 @@ def download_project_data(project_name, cleanup=False):
         for file in camera_files:
             cam_del_status = camera.delete_file(file)
         
-        # Delete the local files after transfer
-        shutil.rmtree(local_path, ignore_errors=True)
+        # Delete the local files after transfer, never the copy on the stick
+        if not on_usb:
+            shutil.rmtree(local_path, ignore_errors=True)
 
         # Cleanup failed
         if not cam_del_status:
@@ -218,14 +232,18 @@ def download_project_data(project_name, cleanup=False):
     return True
 
 def get_projects():
-    base_path = config.LOCAL_DATA_PATH
-    try:
-        projects = os.listdir(base_path)
-    except Exception as e:
-        print(f"Directory list failed: {e}")
-        return False
+    """The projects on the stick and on the local disk, False if none of the folders can be listed"""
+    projects, listed = [], False
+    for root in storage.roots():
+        try:
+            names = [n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n))]
+        except Exception as e:
+            print(f"Directory list failed: {e}")
+            continue
+        listed = True
+        projects += [n for n in names if n not in projects]
 
-    return projects
+    return projects if listed else False
 
 def get_project_files(project_name):
     projects = get_projects()
@@ -236,16 +254,14 @@ def get_project_files(project_name):
     if project_name not in projects:
         return 2
 
-    base_path = config.LOCAL_DATA_PATH
-
-    local_path = os.path.join(base_path, project_name)
+    local_path = storage.find_project_path(project_name)
 
     try:
         project_files = os.listdir(local_path)
     except Exception as e:
         print(f"Directory list failed: {e}")
         return 3
-    
+
     return project_files
 
 def delete_project_files(project_name):
@@ -257,9 +273,7 @@ def delete_project_files(project_name):
     if project_name not in projects:
         return 2
 
-    base_path = config.LOCAL_DATA_PATH
-
-    local_path = os.path.join(base_path, project_name)
+    local_path = storage.find_project_path(project_name)
 
     try:
         shutil.rmtree(local_path)
@@ -271,33 +285,25 @@ def delete_project_files(project_name):
 
 
 def get_local_path(project_name):
-    base_path = config.LOCAL_DATA_PATH
-    
-    local_path = os.path.join(base_path, project_name)
+    """The folder of the project: where it is, or a new one on the stick (else the local disk)"""
+    local_path = storage.find_project_path(project_name)
 
-    if not os.path.exists(local_path):
+    if not local_path:
+        local_path = os.path.join(storage.data_root(), project_name)
         os.makedirs(local_path)
-    
+
     return local_path
 
 def get_usb_path(project_name):
-    base_path = config.BASE_USB_PATH
-    
-    try:
-        devices = os.listdir(base_path)
-    except FileNotFoundError:
-        return False
-    
-    print(f"Found devices: {devices}")
-    
-    if not devices:
-        return False
-    
-    usb_path = os.path.join(base_path, devices[0])
+    """The project folder on the stick with the most room, False if no stick is mounted"""
+    roots = storage.usb_roots()
 
-    project_path = os.path.join(usb_path, project_name)
+    if not roots:
+        return False
+
+    project_path = os.path.join(max(roots, key=storage.free_bytes), project_name)
 
     if not os.path.exists(project_path):
         os.makedirs(project_path)
-    
+
     return project_path

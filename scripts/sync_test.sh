@@ -7,4 +7,4 @@ set -eu
 cd "$(dirname "$0")/.."
 tar --exclude=__pycache__ --exclude=.git --exclude=sdk --exclude=.pytest_cache -cf - . \
   | tailscale ssh radxa@radxa-slam 'rm -rf ~/slam-dev && mkdir ~/slam-dev && tar -xf - -C ~/slam-dev && ln -s ~/LowcostSlamServer/sdk ~/slam-dev/sdk'
-tailscale ssh radxa@radxa-slam "cd ~/slam-dev && ~/slam-dev-venv/bin/python -m pytest -q -p no:cacheprovider ${*:-tests}"
+tailscale ssh radxa@radxa-slam "cd ~/slam-dev && timeout 100 ~/slam-dev-venv/bin/python -m pytest -q -x --durations=5 -p no:cacheprovider ${*:-tests}"
