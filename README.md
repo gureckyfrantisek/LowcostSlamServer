@@ -27,10 +27,30 @@ pip install -r requirements.txt
 ```
 
 ### Run the server
-The server needs sudo permissions for USB port access.
+The IMU (LIS3DH accelerometer) and the GNSS receiver (ZED-F9P) are read over I2C, each on its own bus of the
+40-pin header: the GNSS receiver on pins 3/5 and the IMU on pins 27/28. Buses and addresses are in
+`app/core/config.py` and can be overridden in `.env` (`IMU_I2C_BUS`, `GNSS_I2C_BUS`, `IMU_I2C_ADDRESS`,
+`GNSS_I2C_ADDRESS`, `IMU_I2C_HZ`). The default bus names `/dev/i2c-header-3-5` and `/dev/i2c-header-27-28` come
+from a udev rule, because the plain `/dev/i2c-N` numbers change between boots.
+
+On the Radxa, `sudo sh scripts/bench/setup_i2c_gpio.sh` installs the tools, loads `i2c-dev` at boot, creates those
+names and adds your user to the `i2c` and `gpio` groups (log in again afterwards). The sensors then need no sudo.
+Check the wiring with `/usr/sbin/i2cdetect -y -r <N>`: the F9P answers at `0x42`, the LIS3DH at `0x18`.
+
+The IMU data is stored raw (12 bit counts, 1 mg per count at +-2 g), without calibration or correction.
+
+The server needs sudo permissions for USB port access (the camera).
 ```bash
 sudo .venv/bin/uvicorn app.main:app --reload
 ```
+
+### Tests
+The sensors are simulated, so no hardware is needed for the sensor tests:
+```bash
+pip install pytest httpx2
+python -m pytest tests
+```
+`scripts/sync_test.sh` copies the working tree to a scratch folder on the Radxa and runs the tests there.
 
 ### Try it out
 Open the generated docs in [http://127.0.0.1:8000/docs#](http://127.0.0.1:8000/docs#) and try hitting the endpoints there.

@@ -2,8 +2,7 @@
 import queue
 import threading
 import time
-import serial
-from app.core import config
+from app.core import config, i2c
 
 NMEA = "nmea"
 UBX = "ubx"
@@ -11,13 +10,16 @@ UBX = "ubx"
 _UBX_MAX_PAYLOAD = 4096
 _NMEA_MAX_LEN = 100
 
-_port: serial.Serial | None = None
+_BYTES_AVAILABLE = 0xFD  # 2 bytes, big endian: how much output the receiver has waiting
+_MAX_CHUNK = 128  # a long read would hold the shared bus, and delay the IMU, for too long
+
+_port: "DdcPort | None" = None
 _reader_stop: threading.Event = threading.Event()
 _reader_thread: threading.Thread | None = None
 
-# The serial port is exclusive, so a single reader thread owns it, splits the
-# byte stream into frames and fans each timestamped frame out to every
-# subscriber queue whose `kinds` filter matches.
+# A single reader thread owns the receiver's output, splits the byte stream
+# into frames and fans each timestamped frame out to every subscriber queue
+# whose `kinds` filter matches.
 _subscribers: dict[queue.Queue, frozenset[str]] = {}
 _subscribers_lock = threading.Lock()
 _dropped_frames = 0
@@ -25,6 +27,62 @@ _dropped_frames = 0
 _log_stop: threading.Event | None = None
 _log_thread: threading.Thread | None = None
 _log_queue: queue.Queue | None = None
+
+
+class DdcPort:
+    """The GNSS receiver (u-blox ZED-F9P) on the I2C bus. Interface for the reader loop:
+    in_waiting, read, is_open, close.
+
+    The receiver buffers its output and the host polls it: the register 0xFD / 0xFE holds the
+    number of waiting bytes and a read without a register address returns them. Reading more
+    than is waiting returns 0xFF filler, so it never does."""
+
+    def __init__(self, bus_path, address: int, poll_s: float):
+        self.address = address
+        self.poll_s = poll_s
+        self.errors = 0  # failed transfers (NACK while the receiver is busy), retried on the next poll
+        self._announced = 0
+        try:
+            self.bus = i2c.acquire(bus_path)
+        except OSError as e:
+            raise RuntimeError(f"cannot open the GNSS I2C bus {bus_path}: {e}") from e
+        self.is_open = True
+        try:
+            self.bus.read_registers(address, _BYTES_AVAILABLE, 2)  # fails right here if nothing answers
+        except OSError as e:
+            self.close()
+            raise RuntimeError(f"GNSS receiver does not answer on I2C address 0x{address:02X}: {e}") from e
+
+    @property
+    def in_waiting(self) -> int:
+        """Bytes waiting in the receiver. The following read() takes from this count"""
+        try:
+            high, low = self.bus.read_registers(self.address, _BYTES_AVAILABLE, 2)
+            self._announced = (high << 8) | low
+        except OSError:
+            self.errors += 1
+            self._announced = 0
+        return self._announced
+
+    def read(self, size: int = 1) -> bytes:
+        """Returns up to `size` waiting bytes, or after the poll interval nothing if none are"""
+        n = min(size, self._announced, _MAX_CHUNK)
+        if n <= 0:
+            time.sleep(self.poll_s)
+            return b""
+        try:
+            data = self.bus.read_stream(self.address, n)
+        except OSError:
+            self.errors += 1
+            self._announced = 0
+            return b""
+        self._announced -= n
+        return data
+
+    def close(self):
+        if self.is_open:
+            self.is_open = False
+            i2c.release(self.bus)
 
 
 def _ubx_checksum_ok(frame: bytes) -> bool:
@@ -137,7 +195,7 @@ def _read_loop():
     global _dropped_frames
     parser = _FrameParser()
     while not _reader_stop.is_set():
-        # Waits up to the port timeout for 1 byte, then grabs whatever else arrived
+        # Returns what the receiver has waiting, or nothing after the poll interval
         chunk = _port.read(_port.in_waiting or 1)
         if not chunk:
             continue
@@ -154,11 +212,11 @@ def _read_loop():
                     _dropped_frames += 1  # slow consumer must never block the reader
 
 def open_gnss_port():
-    """Opens the GNSS port and starts the reader thread"""
+    """Opens the GNSS receiver on the I2C bus and starts the reader thread"""
     global _port, _reader_thread
     if _port and _port.is_open:
         return
-    _port = serial.Serial(config.GNSS_PORT, config.GNSS_BAUD_RATE, timeout=0.1)
+    _port = DdcPort(config.GNSS_I2C_BUS, config.GNSS_I2C_ADDRESS, config.GNSS_I2C_POLL_S)
     _reader_stop.clear()
     _reader_thread = threading.Thread(target=_read_loop, daemon=True)
     _reader_thread.start()
@@ -176,8 +234,8 @@ def close_gnss_port():
     _port = None
 
 def verify_connection():
-    """Will implement with the sensor"""
-    return True
+    """The receiver is opened and answering on the bus"""
+    return _port is not None and _port.is_open
 
 def start_logging(project_path) -> int:
     """Logs the raw UBX stream untouched to gnss.ubx, plus gnss_index.csv

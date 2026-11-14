@@ -1,7 +1,5 @@
 fastapi
 uvicorn
 dotenv
-pyserial
 websockets
-numpy
-pyIGRF
+smbus2

@@ -1,7 +1,7 @@
 import asyncio
 import queue
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.core.gnss import subscribe, unsubscribe, NMEA
+from app.core import gnss, imu
 
 router = APIRouter()
 
@@ -9,7 +9,7 @@ router = APIRouter()
 async def gnss_stream(websocket: WebSocket):
     await websocket.accept()
 
-    q = subscribe(kinds=[NMEA], maxsize=100)
+    q = gnss.subscribe(kinds=[gnss.NMEA], maxsize=100)
     try:
         while True:
             try:
@@ -21,4 +21,23 @@ async def gnss_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        unsubscribe(q)
+        gnss.unsubscribe(q)
+
+
+@router.websocket("/ws/imu")
+async def imu_stream(websocket: WebSocket):
+    await websocket.accept()
+
+    q = imu.subscribe(maxsize=100)
+    try:
+        while True:
+            try:
+                # q.get blocks, so run it off the event loop
+                ts, line = await asyncio.to_thread(q.get, True, 0.5)
+            except queue.Empty:
+                continue
+            await websocket.send_text(f"{ts},{line.decode(errors='replace').rstrip()}")
+    except WebSocketDisconnect:
+        pass
+    finally:
+        imu.unsubscribe(q)

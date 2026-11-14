@@ -50,10 +50,6 @@ def start_measurement(project_name):
     if _measurement:
         return 1
 
-    # Refuse before anything starts, so no sensor is left running
-    if not imu.is_calibrated():
-        return 3
-
     # Remember what existed before, so a failed start can be undone cleanly
     project_path = os.path.join(config.LOCAL_DATA_PATH, project_name)
     local_files_before = set(os.listdir(project_path)) if os.path.isdir(project_path) else None
