@@ -7,6 +7,7 @@ from bless import (
     BlessServer,
     GATTAttributePermissions,
     GATTCharacteristicProperties,
+    GATTDescriptorProperties,
 )
 
 from gatt.clients import ClientTracker
@@ -21,6 +22,17 @@ PACKET_GAP_S = 0.01
 
 _P = GATTCharacteristicProperties
 _A = GATTAttributePermissions
+
+# What a phone shows next to each characteristic (the Characteristic User Description, 0x2901): a generic
+# BLE explorer lists custom UUIDs as "Unknown Characteristic", with this the app can tell them apart.
+USER_DESCRIPTION_UUID = "00002901-0000-1000-8000-00805f9b34fb"
+DESCRIPTIONS = {
+    uuids.COMMAND_CHAR_UUID: "Command (write)",
+    uuids.RESPONSE_CHAR_UUID: "Response (notify)",
+    uuids.STATUS_CHAR_UUID: "Status (notify)",
+    uuids.POSITION_CHAR_UUID: "Position (notify)",
+    uuids.INFO_CHAR_UUID: "Info (read)",
+}
 
 # characteristic -> (properties, permissions). Nothing needs encryption or pairing: any phone can use it.
 CHARACTERISTICS = {
@@ -42,6 +54,15 @@ class GattServer:
         self.on_command_write: Callable[[bytes], None] = lambda data: None
 
     async def start(self):
+        """Starts advertising. The names of the characteristics are a nicety: if BlueZ refuses them the
+        server starts without"""
+        try:
+            await self._start(with_descriptions=True)
+        except Exception as e:
+            log.warning("Cannot start with the characteristic names (%s), trying without", e)
+            await self._start(with_descriptions=False)
+
+    async def _start(self, with_descriptions: bool):
         cfg = self._config
         server = BlessServer(name=cfg.device_name, loop=asyncio.get_running_loop())
         server.read_request_func = self._on_read
@@ -50,6 +71,11 @@ class GattServer:
         await server.add_new_service(cfg.service_uuid)
         for char_uuid, (properties, permissions) in CHARACTERISTICS.items():
             await server.add_new_characteristic(cfg.service_uuid, char_uuid, properties, None, permissions)
+            if with_descriptions:
+                await server.add_new_descriptor(cfg.service_uuid, char_uuid, USER_DESCRIPTION_UUID,
+                                                GATTDescriptorProperties.read,
+                                                bytearray(DESCRIPTIONS[char_uuid].encode()),
+                                                GATTAttributePermissions.readable)
 
         await server.start()
         self._server = server

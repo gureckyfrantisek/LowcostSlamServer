@@ -39,6 +39,11 @@ UUID base: `7a1c<xxxx>-5b3e-4c8f-9d2a-6e1f0a4b8c10`. All UUIDs are in `gatt/prot
 | Position | `0005` | READ, NOTIFY | JSON position or error (framed) |
 | Info | `0006` | READ | JSON: who this device is (read once after connecting) |
 
+Each characteristic carries a Characteristic User Description (`0x2901`) with its name, e.g. `Status (notify)`, so a
+BLE explorer such as nRF Connect shows which is which (tap the characteristic or its descriptors). Without it they
+are all "Unknown Characteristic": tell them apart by the `xxxx` above, the last digits of the first UUID block
+(`7a1c000`**`4`**`-...` is Status).
+
 READ returns the complete latest JSON (no framing). NOTIFY delivers the same JSON as framed packets. A READ of
 a value longer than the MTU is a BLE "long read", handled by the phone's stack; prefer the notifications for
 `Status`, which is the longest.

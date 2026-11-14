@@ -21,8 +21,10 @@ class FakeCharacteristic:
 
 class FakeBless:
     instances = []
+    refuse_descriptors = False
 
     def __init__(self, name=None, loop=None):
+        self.descriptors = {}
         self.name, self.services, self.chars, self.updates = name, [], {}, []
         self.started = self.stopped = False
         self.read_request_func = self.write_request_func = None
@@ -33,6 +35,11 @@ class FakeBless:
 
     async def add_new_characteristic(self, service_uuid, char_uuid, properties, value, permissions):
         self.chars[char_uuid] = (service_uuid, properties, permissions, FakeCharacteristic(char_uuid))
+
+    async def add_new_descriptor(self, service_uuid, char_uuid, desc_uuid, properties, value, permissions):
+        if FakeBless.refuse_descriptors:
+            raise RuntimeError("descriptor refused")
+        self.descriptors[(char_uuid, desc_uuid)] = bytes(value)
 
     async def start(self):
         self.started = True
@@ -50,6 +57,7 @@ class FakeBless:
 @pytest.fixture
 def fake_bless(monkeypatch):
     FakeBless.instances.clear()
+    FakeBless.refuse_descriptors = False
     monkeypatch.setattr(gatt_server, "BlessServer", FakeBless)
     return FakeBless
 
@@ -78,6 +86,28 @@ def test_one_service_with_five_characteristics(fake_bless):
     assert set(bless.chars) == {uuids.COMMAND_CHAR_UUID, uuids.RESPONSE_CHAR_UUID, uuids.STATUS_CHAR_UUID,
                                 uuids.POSITION_CHAR_UUID, uuids.INFO_CHAR_UUID}
     assert all(service == uuids.DEVICE_SERVICE_UUID for service, *_ in bless.chars.values())
+
+
+def test_every_characteristic_has_a_name_the_phone_can_show(fake_bless):
+    async def go():
+        await make_server().start()
+        return fake_bless.instances[0]
+    bless = asyncio.run(go())
+    names = {char: value.decode() for (char, desc), value in bless.descriptors.items()
+             if desc == "00002901-0000-1000-8000-00805f9b34fb"}
+    assert names == {uuids.COMMAND_CHAR_UUID: "Command (write)", uuids.RESPONSE_CHAR_UUID: "Response (notify)",
+                     uuids.STATUS_CHAR_UUID: "Status (notify)", uuids.POSITION_CHAR_UUID: "Position (notify)",
+                     uuids.INFO_CHAR_UUID: "Info (read)"}
+
+
+def test_server_starts_without_the_names_when_bluez_refuses_them(fake_bless):
+    async def go():
+        fake_bless.refuse_descriptors = True
+        server = make_server()
+        await server.start()
+        return fake_bless.instances
+    instances = asyncio.run(go())
+    assert len(instances) == 2 and instances[-1].started and instances[-1].descriptors == {}
 
 
 def test_characteristic_properties_and_no_pairing_needed(fake_bless):
