@@ -79,6 +79,12 @@ and sends commands: start and stop a measurement, list, download and delete proj
 no PIN and no pairing is needed. Everything the app needs, with the characteristics, the messages and the error codes,
 is in [docs/GATT.md](docs/GATT.md).
 
+### Control points
+During a measurement the operator can measure control points: `POST /control-point/start?point_id=4001` when standing on
+the point, `POST /control-point/finish` when done. The start and end times and the average GNSS position in between
+(the approximate coordinates; the exact ones come from the post-processing) are stored in `control_points.csv` of the
+project. `/status` shows when the measurement started, how long it has run and the point being measured.
+
 ### USB stick
 Recordings go to a USB stick when one is mounted (in the `LowcostSlam` folder of the stick), else to
 `~/measurements` (`LOCAL_DATA_PATH`). Install the udev rule once and any stick (FAT, exFAT, NTFS, ext4) is mounted under

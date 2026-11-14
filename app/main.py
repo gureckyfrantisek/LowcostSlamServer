@@ -1,14 +1,16 @@
 import asyncio
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.routers import camera, imu, gnss, common, websocket
+from app.routers import camera, control_point, imu, gnss, common, websocket
 from app.core import common as measurement, config, position, supervisors
+from app.core.control_points import control_points
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # The server comes up with whatever is connected; the rest is connected when it appears
     position.hub.bind_loop(asyncio.get_running_loop())
     open_all()
+    position.feed.add_listener(control_points.on_position)
     position.feed.start()
     simulator = asyncio.create_task(position.run_simulator()) if config.POSITION_SIMULATOR else None
     yield   # The server runs int here
@@ -31,5 +33,6 @@ app = FastAPI(title="Lowcost Slam API", lifespan=lifespan)
 app.include_router(camera.router, prefix="/camera", tags=["Camera"])
 app.include_router(imu.router, prefix="/imu", tags=["IMU"])
 app.include_router(gnss.router, prefix="/gnss", tags=["GNSS"])
+app.include_router(control_point.router, prefix="/control-point", tags=["Control points"])
 app.include_router(common.router, tags=["Common"])
 app.include_router(websocket.router)

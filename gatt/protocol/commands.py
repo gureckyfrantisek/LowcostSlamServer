@@ -5,6 +5,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from gatt.protocol.messages import ProtocolError, INVALID_PARAMS
+from shared.names import valid_point_id
 
 SENSORS_ALL = ("camera", "gnss", "imu")
 
@@ -57,6 +58,11 @@ def _coerce(spec: CommandSpec, param: Param, value: Any) -> str:
             if text == "all":
                 raise ProtocolError(INVALID_PARAMS, "use camera.delete_all_files to delete everything")
             return text
+
+        case "point_id":
+            if not valid_point_id(value):
+                raise ProtocolError(INVALID_PARAMS, f"'{param.name}' must be 1-32 letters, digits, '_', '.' or '-'")
+            return value
 
         case "int":
             if isinstance(value, bool) or not isinstance(value, int):
@@ -122,6 +128,12 @@ COMMANDS = _specs(
                 params=(Param("project_name", "project"),), timeout=30, sensors=SENSORS_ALL),
     CommandSpec("measurement.stop", "POST", "/stop",
                 params=(Param("project_name", "project"),), timeout=60, sensors=SENSORS_ALL),
+    # Control points, during a measurement: start when the operator is on the point, finish when done
+    CommandSpec("control_point.start", "POST", "/control-point/start",
+                params=(Param("point_id", "point_id"),), sensors=("gnss",)),
+    CommandSpec("control_point.finish", "POST", "/control-point/finish"),
+    CommandSpec("control_point.cancel", "POST", "/control-point/cancel"),
+    CommandSpec("control_point.list", "GET", "/control-point"),
     CommandSpec("projects.list", "GET", "/projects"),
     CommandSpec("projects.files", "GET", "/projects/{project_name}",
                 params=(Param("project_name", "project", location="path"),)),

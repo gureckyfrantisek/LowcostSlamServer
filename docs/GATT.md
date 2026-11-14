@@ -104,6 +104,10 @@ connected each sees all responses: match them by `id`.
 | `device.info` | - | `GET /info` | 10 s |
 | `measurement.start` | `project_name` | `POST /start?project_name=` | 30 s |
 | `measurement.stop` | `project_name` | `POST /stop?project_name=` | 60 s |
+| `control_point.start` | `point_id` | `POST /control-point/start?point_id=` | 10 s |
+| `control_point.finish` | - | `POST /control-point/finish` | 10 s |
+| `control_point.cancel` | - | `POST /control-point/cancel` | 10 s |
+| `control_point.list` | - | `GET /control-point` | 10 s |
 | `projects.list` | - | `GET /projects` | 10 s |
 | `projects.files` | `project_name` | `GET /projects/{project_name}` | 10 s |
 | `projects.delete` | `project_name` | `DELETE /projects/{project_name}` | 10 s |
@@ -137,6 +141,42 @@ Names must not contain `..`, `\` or control characters; project names must not c
 `measurement.stop` answers `data.warnings`: what went wrong during the measurement (a sensor that was lost, a
 storage that failed). An empty list means all is well. A non-empty one means the data has a gap: tell the user.
 
+### Control points
+
+A control point is a place the operator measures with a known position, to be tied to exact coordinates in the
+post-processing. It is measured **during a measurement**: the operator stands on the point and the app sends
+`control_point.start` with a `point_id` (1-32 letters, digits, `_`, `.` or `-`); when the time is up it sends
+`control_point.finish`. The device stores the **start and end time** (wall clock `start_ns`/`end_ns`, and the
+`CLOCK_MONOTONIC` `start_mono_ns`/`end_mono_ns` that the PPS log is on) and the **average of the GNSS positions**
+that arrived in between as the approximate coordinates (`latitude`, `longitude`, `altitude_m`, how many `positions`,
+their spread `std_m`, the mean `accuracy_m` and the `fix_type`). The exact coordinates are made in the
+post-processing from the raw measurements and the two times. Everything goes to `control_points.csv` in the project.
+
+```json
+{"id": 4, "ok": true, "http_status": 200, "data": {"status": "measured", "warnings": [],
+ "point": {"point_id": "4001", "start_ns": 1794660400000000000, "end_ns": 1794660415000000000,
+           "latitude": 50.098045, "longitude": 14.366902, "altitude_m": 289.2, "positions": 14,
+           "std_m": 0.4, "accuracy_m": 3.1, "fix_type": "gnss"}}}
+```
+
+`warnings` says `no GNSS position arrived while the point was measured` when the point has times but no
+coordinates (no fix): tell the user to measure it again. Errors (`client_error`, with the code in `message` text):
+
+| API answer | Meaning |
+|---|---|
+| 409 `control points are measured during a measurement` | no measurement is running |
+| 409 `point 4001 is still being measured: finish or cancel it first` | only one point at a time |
+| 409 `point 4001 was already measured in this measurement` | a point id is used once per measurement; the app should auto-increment, and may let the user re-measure a point after `cancel` |
+| 409 `no control point is being measured` | `finish` or `cancel` without a `start` |
+| 400 `a point id is 1-32 letters, ...` | invalid id |
+
+`control_point.cancel` forgets the point being measured and stores nothing. If a measurement is stopped while a
+point is open, the stop finishes it and warns. The timestamps are taken when the command arrives on the device, so
+the Bluetooth delay (some tens of ms) is part of them; the positions lag the true time by the receiver's output
+delay (a fraction of a second). Both are fine for a point the operator stands on for several seconds.
+
+The live state is in `Status.recording.control_points`.
+
 ## Status (every 5 s)
 
 While a phone is connected, the GATT server asks the API for its status every `STATUS_POLL_INTERVAL` seconds and
@@ -146,7 +186,8 @@ notifies it on Status (the first one right after a phone connects):
 {"timestamp": 1767225600.1, "api_reachable": true, "status": "not ready",
  "sensors": {"camera": "not connected", "gnss": "ok", "imu": "ok"},
  "detail": {"camera": "no camera found"},
- "recording": {"active": false, "project": null, "problems": []},
+ "recording": {"active": true, "project": "run1", "problems": [], "started_ns": 1794660000000000000, "elapsed_s": 83.0,
+               "control_points": {"count": 2, "open": {"point_id": "4003", "elapsed_s": 4.1, "positions": 4}}},
  "disk": {"location": "usb", "usb_present": true, "free_mb": 28131, "hours_left": 1223.1, "level": "ok"},
  "warnings": [],
  "events": [{"ts_ns": 1767225590000000000, "source": "camera", "kind": "lost", "detail": "stopped answering"}],
@@ -159,7 +200,7 @@ notifies it on Status (the first one right after a phone connects):
 | `status` | `ready` when camera, GNSS and IMU all answer, else `not ready` |
 | `sensors` | `ok` or `not connected` per device. The server reconnects them by itself, so this changes back without the app doing anything |
 | `detail` | only for a device that is not ok: why (`no camera found`, `GNSS receiver does not answer ...`) |
-| `recording` | `active` and `project` of a running measurement; `problems`: what is wrong right now (a sensor lost, storage failed) |
+| `recording` | `active` and `project` of a running measurement; `problems`: what is wrong right now (a sensor lost, storage failed). While it runs also `started_ns` (device wall clock), `elapsed_s` (counted on the device: show this, it stays right after a reconnect and does not depend on the clocks agreeing) and `control_points`: `count` measured and `open`, the point being measured now (`point_id`, `elapsed_s`, `positions` so far) or `null` |
 | `disk` | where recordings go (`usb` or `local`), room left, and `level`: `ok`, `low` (less than 3 hours of recording fit) or `full` (less than 10 minutes, starting is refused) |
 | `warnings` | sentences to show to the user: low storage, sensor lost during the measurement |
 | `events` | the last three: `source` (camera, gnss, imu, server), `kind` (`lost`, `back`, `storage_error`, `error`) |

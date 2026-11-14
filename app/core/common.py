@@ -7,11 +7,13 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 from app.core import camera, config, events, gnss, imu, storage, supervisors
+from app.core.control_points import control_points
 
 # Only a shortcut to if we're recording or not
 _measurement = False
 _measurement_name = None
 _measurement_start_ns = 0
+_measurement_start_mono_ns = 0
 _measurement_path = None  # folder of the running measurement (the stick may be gone when it stops)
 _start_error = None  # why the last start failed
 # Start and stop come from separate request threads: one at a time
@@ -84,8 +86,16 @@ def get_recording_state() -> dict:
         for name, state in get_sensor_states().items():
             if state["state"] != "ok":
                 problems.append(f"{name} is not connected, its data has a gap")
-    return {"active": bool(_measurement), "project": _measurement_name if _measurement else None,
-            "problems": problems}
+    state = {"active": bool(_measurement), "project": _measurement_name if _measurement else None,
+             "problems": problems}
+    if _measurement:
+        # elapsed is counted here, so a phone that reconnects shows the right time without the clocks agreeing
+        state["started_ns"] = _measurement_start_ns
+        state["elapsed_s"] = round((time.monotonic_ns() - _measurement_start_mono_ns) / 1e9, 1)
+        state["control_points"] = control_points.state()
+        if control_points.write_error:
+            problems.append(f"control points are no longer written: {control_points.write_error}")
+    return state
 
 def start_measurement(project_name):
     """Starts video capture and GNSS and IMU logging
@@ -96,7 +106,7 @@ def start_measurement(project_name):
         return _start_measurement(project_name)
 
 def _start_measurement(project_name):
-    global _measurement, _measurement_name, _measurement_start_ns, _measurement_path, _start_error
+    global _measurement, _measurement_name, _measurement_start_ns, _measurement_start_mono_ns, _measurement_path, _start_error
 
     # Return if already recording
     if _measurement:
@@ -124,6 +134,7 @@ def _start_measurement(project_name):
         local_path = get_local_path(project_name)
 
         events.start_recording(local_path)
+        control_points.begin_recording(local_path)
 
         # Start IMU and GNSS immediately
         imu_start_ns = imu.start_logging(local_path)
@@ -161,6 +172,7 @@ def _start_measurement(project_name):
     _measurement = True
     _measurement_name = project_name
     _measurement_start_ns = time.time_ns()
+    _measurement_start_mono_ns = time.monotonic_ns()
     _measurement_path = local_path
     return True
 
@@ -181,6 +193,7 @@ def abort_start(project_path, local_files_before, camera_files_before):
     attempt(imu.stop_logging)
     attempt(gnss.stop_logging)
     attempt(camera.stop_recording)
+    attempt(control_points.end_recording)
     attempt(events.stop_recording)
 
     # Camera files created by the attempt
@@ -224,6 +237,9 @@ def _stop_measurement(project_name):
     # Files before ending
     files_old = attempt("camera file list", camera.get_camera_files_list)
 
+    problems += control_points.end_recording()     # a point still being measured is finished by the stop
+    points = control_points.points()
+
     attempt("stop camera", camera.stop_recording)
     attempt("stop GNSS", gnss.stop_logging)
     attempt("stop IMU", imu.stop_logging)
@@ -248,6 +264,7 @@ def _stop_measurement(project_name):
         with open(meta_path, "r") as f:
             metadata = json.load(f)
         metadata["camera_files"] = files_new
+        metadata["control_points"] = len(points)
         metadata["problems"] = problems
         metadata["events"] = during
         with open(meta_path, "w") as f:

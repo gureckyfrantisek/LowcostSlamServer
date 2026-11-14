@@ -74,6 +74,11 @@ class GnssFeed:
         self._thread: Optional[threading.Thread] = None
         self.positions = 0
         self.no_fix = True   # the last thing said: nothing yet counts as no fix
+        self._listeners = []
+
+    def add_listener(self, callback):
+        """callback(Position) runs in the feed thread for every position (keep it quick)"""
+        self._listeners.append(callback)
 
     def start(self):
         self._stop.clear()
@@ -108,6 +113,11 @@ class GnssFeed:
                     self.no_fix = False
                     self.positions += 1
                     self._hub.publish(result)
+                    for listener in self._listeners:
+                        try:
+                            listener(result)
+                        except Exception:
+                            log.exception("position listener failed")
         finally:
             gnss.unsubscribe(q)
 
