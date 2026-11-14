@@ -24,6 +24,7 @@ _CFG_MSGOUT_RXM_RAWX_I2C = 0x209102A4   # U1: output RXM-RAWX every n-th epoch o
 _CFG_MSGOUT_RXM_SFRBX_I2C = 0x20910231
 _CFG_MSGOUT_TIM_TM2_I2C = 0x20910178
 _CFG_MSGOUT_TIM_TP_I2C = 0x2091017D
+_CFG_MSGOUT_NMEA_GST_I2C = 0x209100D3   # the position error estimate: the accuracy of a position
 _CFG_TP_TIMEGRID_TP1 = 0x2005000C       # 0 = UTC, 1 = GPS
 _VALUE_BYTES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}  # key bits 28..30 -> value bytes
 _UBX_CFG_VALSET = (0x06, 0x8A)
@@ -147,6 +148,7 @@ def receiver_settings(rate_hz: int) -> dict[int, int]:
         _CFG_MSGOUT_RXM_SFRBX_I2C: 1,
         _CFG_MSGOUT_TIM_TM2_I2C: 1,
         _CFG_MSGOUT_TIM_TP_I2C: 1,
+        _CFG_MSGOUT_NMEA_GST_I2C: 1,
         _CFG_TP_TIMEGRID_TP1: 1,  # PPS and time marks on the GPS time grid
     }
 

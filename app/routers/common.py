@@ -4,6 +4,11 @@ from app.core.common import *
 
 router = APIRouter()
 
+@router.get("/info")
+def get_info_route():
+    """Who this device is and how it is set up (does not change while the server runs)"""
+    return responses.JSONResponse(content=device_info())
+
 @router.get("/status")
 def get_status_route():
     status = get_status()

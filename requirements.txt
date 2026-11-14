@@ -3,3 +3,5 @@ uvicorn
 dotenv
 websockets
 smbus2
+httpx
+bless; sys_platform == "linux"

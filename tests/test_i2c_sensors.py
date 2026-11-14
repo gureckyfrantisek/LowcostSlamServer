@@ -198,6 +198,7 @@ def test_gnss_raw_output_is_switched_on_at_open(bus):
         0x209102A4: 1, 0x20910231: 1,          # RXM-RAWX, RXM-SFRBX
         0x20910178: 1, 0x2091017D: 1,          # TIM-TM2 (IMU INT1 time marks), TIM-TP
         0x2005000C: 1,                         # PPS on the GPS time grid
+        0x209100D3: 1,                         # NMEA GST: the accuracy of a position
     }
     assert gnss.get_stats()["raw_output"] is True
 

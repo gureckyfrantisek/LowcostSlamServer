@@ -1,0 +1,22 @@
+[Unit]
+Description=Lowcost SLAM Bluetooth (BLE GATT) server
+Documentation=file:///opt/LowcostSlamServer/docs/GATT.md
+# Wants (not Requires): the GATT server keeps running when the API restarts. It retries the API
+# connection on its own, so the order is only a convenience.
+Wants=bluetooth.service lowcost-slam-api.service
+After=bluetooth.service lowcost-slam-api.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Root keeps the BlueZ D-Bus access simple; another user needs a policy in /etc/dbus-1/system.d/
+User=root
+WorkingDirectory=/opt/LowcostSlamServer
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/LowcostSlamServer/.env
+ExecStart=/opt/LowcostSlamServer/.venv/bin/python -m gatt.main
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

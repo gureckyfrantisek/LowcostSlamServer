@@ -5,11 +5,11 @@
 #   sudo sh deploy/install.sh
 #
 # What it does:
-#   - installs the packages (python venv, libgpiod, i2c tools)
+#   - installs the packages (python venv, libgpiod, i2c tools, bluez)
 #   - copies the server to /opt/LowcostSlamServer and makes its virtual environment
 #     (with the system packages, python3-libgpiod is not on PyPI as a wheel)
 #   - installs the udev rules: names of the header I2C buses, gpio / PM QoS access, USB stick automount
-#   - installs the systemd unit, enables it and (re)starts it
+#   - installs the systemd units (the API and the Bluetooth GATT server), enables them and (re)starts them
 #   - keeps the journal on disk, so the log of a field problem survives a reboot
 # Your /opt/LowcostSlamServer/.env (see deploy/env.example) is never overwritten.
 #
@@ -26,6 +26,7 @@ ETC_DIR=${ETC_DIR:-/etc}
 NO_SYSTEM=${NO_SYSTEM:-0}
 USER_NAME=${SUDO_USER:-radxa}
 SERVICE=lowcost-slam-api
+GATT_SERVICE=lowcost-slam-gatt
 
 say() { printf '== %s\n' "$*"; }
 
@@ -38,7 +39,7 @@ fi
 if [ "$NO_SYSTEM" != 1 ]; then
     say "packages"
     apt-get update -qq
-    apt-get install -y -qq python3-venv python3-libgpiod python3-smbus2 i2c-tools
+    apt-get install -y -qq python3-venv python3-libgpiod python3-smbus2 i2c-tools bluez
     grep -qx i2c-dev "$ETC_DIR/modules-load.d/i2c-dev.conf" 2>/dev/null \
         || { mkdir -p "$ETC_DIR/modules-load.d"; echo i2c-dev >> "$ETC_DIR/modules-load.d/i2c-dev.conf"; }
     modprobe i2c-dev || true
@@ -51,7 +52,11 @@ mkdir -p "$PREFIX"
 rm -rf "$PREFIX/app"
 cp -a "$SRC/app" "$PREFIX/app"
 cp -a "$SRC/requirements.txt" "$PREFIX/requirements.txt"
-find "$PREFIX/app" -name __pycache__ -type d -prune -exec rm -rf {} +
+rm -rf "$PREFIX/gatt" "$PREFIX/shared" "$PREFIX/docs"
+cp -a "$SRC/gatt" "$PREFIX/gatt"
+cp -a "$SRC/shared" "$PREFIX/shared"
+cp -a "$SRC/docs" "$PREFIX/docs"
+find "$PREFIX/app" "$PREFIX/gatt" "$PREFIX/shared" -name __pycache__ -type d -prune -exec rm -rf {} +
 if [ -d "$SRC/sdk" ]; then
     rm -rf "$PREFIX/sdk"
     cp -aL "$SRC/sdk" "$PREFIX/sdk"
@@ -71,7 +76,7 @@ cp "$HERE/60-rockpix-header.rules" "$HERE/99-usb-automount.rules" "$UDEV_DIR/"
 
 say "service"
 mkdir -p "$UNIT_DIR"
-cp "$HERE/$SERVICE.service" "$UNIT_DIR/$SERVICE.service"
+cp "$HERE/$SERVICE.service" "$HERE/$GATT_SERVICE.service" "$UNIT_DIR/"
 mkdir -p "$ETC_DIR/systemd/journald.conf.d"
 cat > "$ETC_DIR/systemd/journald.conf.d/lowcost-slam.conf" <<'EOF'
 [Journal]
@@ -89,16 +94,20 @@ udevadm trigger --action=add --subsystem-match=gpio --subsystem-match=i2c-dev --
 udevadm settle
 systemctl restart systemd-journald
 systemctl daemon-reload
-systemctl enable "$SERVICE"
+systemctl enable bluetooth
+systemctl restart bluetooth
+systemctl enable "$SERVICE" "$GATT_SERVICE"
 systemctl restart "$SERVICE"
+systemctl restart "$GATT_SERVICE"
 
 say "done"
 sleep 3
-systemctl --no-pager --lines=15 status "$SERVICE" || true
+systemctl --no-pager --lines=15 status "$SERVICE" "$GATT_SERVICE" || true
 cat <<EOF
 
-The server starts at every boot. Useful:
-  systemctl status $SERVICE          journalctl -u $SERVICE -f
-  sudo systemctl restart $SERVICE    sudo systemctl disable --now $SERVICE
+The server and the Bluetooth service start at every boot. Useful:
+  systemctl status $SERVICE $GATT_SERVICE      journalctl -u $SERVICE -u $GATT_SERVICE -f
+  sudo systemctl restart $SERVICE              sudo systemctl disable --now $SERVICE $GATT_SERVICE
+The phone finds the device by its Bluetooth name (SLAM-xxx) and the service UUID, see docs/GATT.md.
 Settings: $PREFIX/.env (copy $PREFIX/.env.example). Log out and in once so '$USER_NAME' gets the gpio and i2c groups.
 EOF

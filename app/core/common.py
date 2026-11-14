@@ -46,6 +46,18 @@ def get_status():
     return result
 
 
+def device_info() -> dict:
+    """Identity and settings of this device, for the app to show and to check compatibility"""
+    return {
+        "name": config.DEVICE_NAME,
+        "id": config.DEVICE_ID,
+        "api_version": 1,
+        "imu": {"hz": config.IMU_I2C_HZ, "range_g": config.IMU_RANGE_G},
+        "gnss": {"hz": config.GNSS_RATE_HZ},
+        "storage": {"local_path": config.LOCAL_DATA_PATH},
+        "capabilities": ["measurement", "projects", "camera", "position", "usb_storage"],
+    }
+
 def get_sensor_states() -> dict:
     """What each device is doing: ok, or missing with the reason, and since when"""
     out = {}

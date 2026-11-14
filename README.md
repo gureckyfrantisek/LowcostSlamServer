@@ -70,6 +70,15 @@ sudo systemctl disable --now lowcost-slam-api   # back to running it by hand
 The `radxa` user is in the `sudo` group, so `sudo` asks for its password. The service runs as root (the camera
 SDK needs USB access) and the sensors need no root: with the udev rules, the `gpio` and `i2c` groups are enough.
 
+### Bluetooth (the phone app)
+The phone controls the device over Bluetooth Low Energy (BLE). A second process, `python -m gatt.main`, advertises a GATT
+service and forwards the phone's commands to this API; `sudo sh deploy/install.sh` installs and starts it together with
+the API. The phone finds the device by its Bluetooth name (`SLAM-xxx`, different on every board) and the service UUID,
+reads its `Info`, gets the status every 5 s, the GNSS position about once a second (parsed from the receiver's NMEA),
+and sends commands: start and stop a measurement, list, download and delete projects. Any phone may connect, there is
+no PIN and no pairing is needed. Everything the app needs, with the characteristics, the messages and the error codes,
+is in [docs/GATT.md](docs/GATT.md).
+
 ### USB stick
 Recordings go to a USB stick when one is mounted (in the `LowcostSlam` folder of the stick), else to
 `~/measurements` (`LOCAL_DATA_PATH`). Install the udev rule once and any stick (FAT, exFAT, NTFS, ext4) is mounted under
@@ -104,7 +113,7 @@ a power dip is configured again.
 ### Tests
 The sensors are simulated, so no hardware is needed for the sensor tests:
 ```bash
-pip install pytest httpx2
+pip install pytest httpx2 httpx bless
 python -m pytest tests
 ```
 `scripts/sync_test.sh` copies the working tree to a scratch folder on the Radxa and runs the tests there.
