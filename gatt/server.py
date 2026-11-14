@@ -106,7 +106,10 @@ class GattServer:
     # bless callbacks run on the event loop thread
     def _on_read(self, characteristic, **kwargs):
         uuid = str(characteristic.uuid).lower()
-        return bytearray(self._read_cache.get(uuid, b""))
+        data = self._read_cache.get(uuid, b"")
+        # Reads are rare (the phone asks), so every one is logged: it shows what was answered
+        log.info("READ %s: %d bytes %s", DESCRIPTIONS.get(uuid, uuid), len(data), data[:60])
+        return bytearray(data)
 
     def _on_write(self, characteristic, value, **kwargs):
         if str(characteristic.uuid).lower() == uuids.COMMAND_CHAR_UUID:
