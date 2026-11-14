@@ -105,22 +105,28 @@ def test_malformed_and_unknown_commands():
     assert malformed["error"]["code"] == "malformed_request" and malformed["id"] is None
 
 
-def test_status_poll_aggregates_and_survives_failures():
+def test_status_poll_is_one_call_with_the_camera_block():
+    paths = []
+
     def handler(request):
-        if request.url.path == "/status":
-            return httpx.Response(500, json={"status": "not ready", "sensors": {"camera": "ok", "gnss": "not connected", "imu": "ok"}})
-        if request.url.path == "/camera/battery":
-            return httpx.Response(200, json={"battery": {"level": 80}})
-        return httpx.Response(500, json={"status": "couldn't check storage"})
+        paths.append(request.url.path)
+        return httpx.Response(500, json={
+            "status": "not ready", "sensors": {"camera": "ok", "gnss": "not connected", "imu": "ok"},
+            "camera": {"connected": True, "name": "X4", "video": "360", "quality": "5.7K/30", "recording": False,
+                       "battery": {"level": 80, "scale": 100, "percent": 80},
+                       "card": {"state": "ok", "free_mb": 9000, "total_mb": 64000, "free_percent": 14},
+                       "warnings": ["a long sentence the app gets from the warnings list instead"]}})
 
     async def go():
         return await StatusPoller(api_with(handler), ClientTracker(), 5, None).poll_once()
 
     report = asyncio.run(go())
+    assert paths == ["/status"]                                   # no separate battery and storage calls
     assert report["status"] == "not ready" and report["sensors"]["gnss"] == "not connected"
-    assert report["battery"] == {"level": 80}
-    assert report["errors"]["storage"]["code"] == "server_error"
-    assert report["api_reachable"] is True
+    assert report["camera"] == {"name": "X4", "video": "360", "quality": "5.7K/30", "recording": False,
+                                "battery": {"level": 80, "scale": 100, "percent": 80},
+                                "card": {"state": "ok", "free_mb": 9000, "total_mb": 64000, "free_percent": 14}}
+    assert report["api_reachable"] is True and "errors" not in report
 
 
 def test_status_poll_with_api_down():

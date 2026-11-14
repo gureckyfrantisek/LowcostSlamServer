@@ -154,6 +154,7 @@ COMMANDS = _specs(
     CommandSpec("camera.delete_file", "DELETE", "/camera/files/{name}",
                 params=(Param("name", "camera_path", location="path"),), sensors=("camera",)),
     CommandSpec("camera.delete_all_files", "DELETE", "/camera/files/all", timeout=60, sensors=("camera",)),
+    CommandSpec("camera.info", "GET", "/camera/info"),
     CommandSpec("camera.battery", "GET", "/camera/battery", sensors=("camera",)),
     CommandSpec("camera.storage", "GET", "/camera/storage", sensors=("camera",)),
 )

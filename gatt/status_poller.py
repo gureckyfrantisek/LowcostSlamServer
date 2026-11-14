@@ -19,6 +19,10 @@ def compact_status(data: dict) -> dict:
     """What /status says, small enough to read in one go over BLE: why a device is missing, the state of
     the measurement and the disk, what to warn about, and the last few events"""
     out = {"status": data.get("status"), "sensors": data.get("sensors")}
+    camera = data.get("camera")
+    if isinstance(camera, dict) and camera.get("connected"):
+        out["camera"] = {k: camera[k] for k in ("name", "type", "video", "mode", "quality", "encode", "recording",
+                                                 "battery", "card", "stopped") if camera.get(k) is not None}
     details = data.get("details")
     if isinstance(details, dict):
         why = {name: d.get("detail") for name, d in details.items()
@@ -67,37 +71,23 @@ class StatusPoller:
             await asyncio.sleep(self._interval)
 
     async def poll_once(self) -> dict:
-        """One aggregate read: /status plus the camera's battery and storage."""
-        timeout = self._interval
-        status, battery, storage = await asyncio.gather(
-            self._api.call(COMMANDS["device.status"], {}, timeout=timeout),
-            self._api.call(COMMANDS["camera.battery"], {}, timeout=timeout),
-            self._api.call(COMMANDS["camera.storage"], {}, timeout=timeout),
-            return_exceptions=True,
-        )
+        """One read: /status, which carries the camera's battery, card and mode too"""
+        try:
+            status = await self._api.call(COMMANDS["device.status"], {}, timeout=self._interval)
+        except BaseException as e:
+            status = e
 
         report: dict = {"timestamp": round(time.time(), 3), "api_reachable": True}
-        errors: dict = {}
 
         if isinstance(status, ApiError):
             report["api_reachable"] = status.code not in ("api_unavailable", "api_timeout")
-            errors["status"] = {"code": status.code, "message": status.message}
+            report["errors"] = {"status": {"code": status.code, "message": status.message}}
         elif isinstance(status, BaseException):
+            if isinstance(status, asyncio.CancelledError):
+                raise status
             log.error("status poll crashed: %r", status)
-            errors["status"] = {"code": "internal_error", "message": "status poll failed"}
+            report["errors"] = {"status": {"code": "internal_error", "message": "status poll failed"}}
         else:
             report.update(compact_status(status.data))
-
-        for key, result in (("battery", battery), ("storage", storage)):
-            if isinstance(result, ApiError):
-                errors[key] = {"code": result.code, "message": result.message}
-            elif isinstance(result, BaseException):
-                log.error("%s poll crashed: %r", key, result)
-                errors[key] = {"code": "internal_error", "message": f"{key} poll failed"}
-            else:
-                report[key] = result.data.get(key)
-
-        if errors:
-            report["errors"] = errors
 
         return report

@@ -74,6 +74,8 @@ class GnssFeed:
         self._thread: Optional[threading.Thread] = None
         self.positions = 0
         self.no_fix = True   # the last thing said: nothing yet counts as no fix
+        self.last_monotonic = 0.0   # when the last position arrived
+        self.last_position = None
         self._listeners = []
 
     def add_listener(self, callback):
@@ -111,6 +113,7 @@ class GnssFeed:
                         self._hub.publish(None)
                 elif result is not None:
                     self.no_fix = False
+                    self.last_monotonic, self.last_position = time.monotonic(), result
                     self.positions += 1
                     self._hub.publish(result)
                     for listener in self._listeners:

@@ -119,6 +119,7 @@ connected each sees all responses: match them by `id`.
 | `camera.files` | - | `GET /camera/files` | 10 s |
 | `camera.delete_file` | `name` | `DELETE /camera/files/{name}` (`all` is refused) | 10 s |
 | `camera.delete_all_files` | - | `DELETE /camera/files/all` | 60 s |
+| `camera.info` | - | `GET /camera/info` (the `camera` block of Status, on demand) | 10 s |
 | `camera.battery` | - | `GET /camera/battery` | 10 s |
 | `camera.storage` | - | `GET /camera/storage` | 10 s |
 
@@ -136,7 +137,11 @@ Names must not contain `..`, `\` or control characters; project names must not c
 | 507 | `server_error` / `storage full` | less than ten minutes of room: ask them to plug a stick or free space |
 | 400 | `client_error` / `invalid project name` | the name must be one plain folder name |
 | 500 | `server_error` / `already measuring` | the measurement runs: go to the running screen |
-| 500 | `server_error` / `failed to start` | something broke half way (rolled back); retry |
+| 500 | `server_error` / `failed to start` | something broke half way (rolled back); retry. The reason is in the API's `reason`, for example "the camera refused to switch to the video mode" |
+
+Before it records, the server puts the camera into the video mode, sets the quality (`CAMERA_QUALITY`, default
+`5.7K30`) and, when the GNSS confirms the system clock, sets the camera clock. A camera left in a photo mode no longer
+makes the start fail.
 
 `measurement.stop` answers `data.warnings`: what went wrong during the measurement (a sensor that was lost, a
 storage that failed). An empty list means all is well. A non-empty one means the data has a gap: tell the user.
@@ -191,8 +196,9 @@ notifies it on Status (the first one right after a phone connects):
  "disk": {"location": "usb", "usb_present": true, "free_mb": 28131, "hours_left": 1223.1, "level": "ok"},
  "warnings": [],
  "events": [{"ts_ns": 1767225590000000000, "source": "camera", "kind": "lost", "detail": "stopped answering"}],
- "battery": {}, "storage": {},
- "errors": {"storage": {"code": "server_error", "message": "couldn't check storage"}}}
+ "camera": {"name": "Insta360 X4", "type": "Insta360X4", "video": "360", "mode": "video_normal", "quality": "5.7K/30",
+            "encode": "h265", "recording": true, "battery": {"level": 80, "scale": 100, "percent": 80},
+            "card": {"state": "ok", "free_mb": 20000, "total_mb": 64000, "free_percent": 31}}}
 ```
 
 | Field | Meaning |
@@ -202,9 +208,9 @@ notifies it on Status (the first one right after a phone connects):
 | `detail` | only for a device that is not ok: why (`no camera found`, `GNSS receiver does not answer ...`) |
 | `recording` | `active` and `project` of a running measurement; `problems`: what is wrong right now (a sensor lost, storage failed). While it runs also `started_ns` (device wall clock), `elapsed_s` (counted on the device: show this, it stays right after a reconnect and does not depend on the clocks agreeing) and `control_points`: `count` measured and `open`, the point being measured now (`point_id`, `elapsed_s`, `positions` so far) or `null` |
 | `disk` | where recordings go (`usb` or `local`), room left, and `level`: `ok`, `low` (less than 3 hours of recording fit) or `full` (less than 10 minutes, starting is refused) |
-| `warnings` | sentences to show to the user: low storage, sensor lost during the measurement |
+| `warnings` | sentences to show to the user: low storage, sensor lost during the measurement, camera battery under 15 %, camera card under 10 % free or full, camera too hot, "the camera stopped recording by itself: STORAGE_FULL", "the camera is recording but no measurement runs" |
 | `events` | the last three: `source` (camera, gnss, imu, server), `kind` (`lost`, `back`, `storage_error`, `error`) |
-| `battery`, `storage` | the **camera's** values exactly as the camera reports them (`storage` here is the camera card, not the disk) |
+| `camera` | only while the camera is connected: `name`/`type`, `video` (`360` or `wide`), `mode` and `quality` (what the server **set** before the last recording; the SDK cannot read them back, so they are empty until the first recording), `encode`, `recording` (does the camera say it is recording **now**), `battery` (`percent`) and `card` (`state`: `ok`, `no_card`, `full`, `invalid_format`, `write_protected`, `error`; free and total space; `free_percent`), and `stopped` when the camera stopped recording by itself (`reason`: `STORAGE_FULL`, `LOW_BATTERY`, `HIGH_TEMP`, `OVER_TIME_LIMIT`, `LOW_CARD_SPEED`, `DROP_FRAMES`, ...). The camera is asked every 5 s in the background, so these may be that old |
 | `errors` | only when something failed; if the API is down `api_reachable` is `false` and `errors.status.code` is `api_unavailable` |
 
 ## Position

@@ -72,6 +72,12 @@ def delete_files_route(
         content={"status": "couldn't delete"}
     )
 
+@router.get("/info")
+def get_info_route():
+    """Mode, quality, battery, card and recording state of the camera, and what it reported by itself"""
+    return responses.JSONResponse(status_code=200, content=get_info())
+
+
 @router.get("/battery")
 def get_battery_route():
     response = get_battery_status()

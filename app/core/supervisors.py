@@ -12,7 +12,7 @@ def start_all(wait_s: float = 5.0):
     stop_all()
     # The lambdas look the functions up when called, not now
     _supervisors["camera"] = Supervisor("camera", lambda: camera.open_camera(), lambda: camera.close_camera(),
-                                        lambda: camera.verify_connection(), check_s=2.0 * SCALE, retry_s=1.0 * SCALE,
+                                        lambda: camera.healthy(), check_s=2.0 * SCALE, retry_s=1.0 * SCALE,
                                         max_retry_s=5.0 * SCALE)
     _supervisors["gnss"] = Supervisor("gnss", lambda: gnss.open_gnss_port(), lambda: gnss.close_gnss_device(),
                                       lambda: gnss.verify_connection(), check_s=1.0 * SCALE, retry_s=1.0 * SCALE,

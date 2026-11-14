@@ -44,3 +44,10 @@ from shared.device import device_id, device_name
 
 DEVICE_ID = device_id()
 DEVICE_NAME = device_name()
+
+# Camera: the server puts the camera into the video mode and sets the quality before every recording
+CAMERA_SET_MODE = os.getenv('CAMERA_SET_MODE', '1').lower() in ('1', 'true', 'yes')  # a camera left in a photo mode refuses to record
+CAMERA_QUALITY = os.getenv('CAMERA_QUALITY', '5.7K30')  # 4K24..4K100, 5.7K24..5.7K60, 6K24..6K30, 8K24..8K30, 11K30; empty = leave as set
+CAMERA_BITRATE_MBPS = float(os.getenv('CAMERA_BITRATE_MBPS') or 0)  # 0 = the camera default
+CAMERA_SYNC_CLOCK = os.getenv('CAMERA_SYNC_CLOCK', '1').lower() in ('1', 'true', 'yes')  # only when the GNSS confirms the system clock
+CAMERA_INFO_REFRESH_S = float(os.getenv('CAMERA_INFO_REFRESH_S') or 5)  # how old the battery, card and recording state in /status may be

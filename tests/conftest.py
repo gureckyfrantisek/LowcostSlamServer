@@ -7,8 +7,13 @@ import pytest
 try:
     from sdk import camerasdk  # noqa: F401
 except Exception:
+    import enum
     sdk = types.ModuleType("sdk")
     sdk.camerasdk = types.ModuleType("sdk.camerasdk")
+    sdk.camerasdk.SubVideoMode = enum.IntEnum("SubVideoMode", {"VIDEO_NORMAL": 0})
+    sdk.camerasdk.VideoResolution = enum.IntEnum("VideoResolution", {
+        "RES_3840_1920P30": 0, "RES_2880_2880P30": 10, "RES_3840_3840P30": 167})
+    sdk.camerasdk.CaptureStoppedErrorCode = enum.IntEnum("CaptureStoppedErrorCode", {"STORAGE_FULL": 1, "LOW_BATTERY": 7})
     sys.modules["sdk"], sys.modules["sdk.camerasdk"] = sdk, sdk.camerasdk
 
 

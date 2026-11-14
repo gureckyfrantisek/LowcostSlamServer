@@ -79,6 +79,14 @@ and sends commands: start and stop a measurement, list, download and delete proj
 no PIN and no pairing is needed. Everything the app needs, with the characteristics, the messages and the error codes,
 is in [docs/GATT.md](docs/GATT.md).
 
+### Camera
+Before every recording the server puts the camera into the video mode (a camera left in a photo mode used to make the
+start fail) and sets the quality, `5.7K30` by default (`CAMERA_QUALITY` in `.env`, see `deploy/env.example`). When the GNSS
+confirms the system clock it also sets the camera clock. `/status` and `/camera/info` show the camera: mode, quality,
+battery, card, whether it is recording, and what it reported by itself (stopped because the card is full, low battery, ...).
+This needs the `camerasdk` module built from the current [wrapper](https://github.com/gureckyfrantisek/Insta360CameraSDKPythonWrapper);
+with an older build the server still records and says so.
+
 ### Control points
 During a measurement the operator can measure control points: `POST /control-point/start?point_id=4001` when standing on
 the point, `POST /control-point/finish` when done. The start and end times and the average GNSS position in between

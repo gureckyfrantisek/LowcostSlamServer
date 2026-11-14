@@ -86,6 +86,13 @@ def get_recording_state() -> dict:
         for name, state in get_sensor_states().items():
             if state["state"] != "ok":
                 problems.append(f"{name} is not connected, its data has a gap")
+        info = camera.get_info()
+        stopped = info.get("stopped")
+        if stopped and stopped["ts_ns"] >= _measurement_start_ns:
+            problems.append(f"the camera stopped recording by itself: {stopped['reason']}")
+        elif info.get("connected") and info.get("recording") is False and \
+                time.monotonic_ns() - _measurement_start_mono_ns > 10 * 1_000_000_000:
+            problems.append("the camera is not recording")
     state = {"active": bool(_measurement), "project": _measurement_name if _measurement else None,
              "problems": problems}
     if _measurement:

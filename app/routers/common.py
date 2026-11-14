@@ -20,7 +20,11 @@ def get_status_route():
     all_connected = camera_ok and gnss_ok and imu_ok
     storage_status = storage.status()
     recording = get_recording_state()
-    warnings = recording["problems"] + ([storage_status["message"]] if storage_status["level"] != "ok" else [])
+    camera_info = camera.get_info()
+    warnings = (recording["problems"] + ([storage_status["message"]] if storage_status["level"] != "ok" else [])
+                + [w for w in camera_info.get("warnings", []) if w not in recording["problems"]])
+    if camera_info.get("recording") and not recording["active"]:
+        warnings.append("the camera is recording but no measurement runs")
 
     return responses.JSONResponse(
         status_code=200 if all_connected else 500,
@@ -32,6 +36,7 @@ def get_status_route():
                 "imu":    "ok" if imu_ok     else "not connected",
             },
             "details": get_sensor_states(),
+            "camera": camera_info,
             "recording": recording,
             "storage": storage_status,
             "warnings": warnings,
