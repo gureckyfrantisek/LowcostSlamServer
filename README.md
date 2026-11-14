@@ -51,6 +51,25 @@ The server needs sudo permissions for USB port access (the camera).
 sudo .venv/bin/uvicorn app.main:app --reload
 ```
 
+### Install as a service (autostart at boot)
+On the Radxa, from a checkout of the repository:
+```bash
+sudo sh deploy/install.sh
+```
+It installs the packages, copies the server to `/opt/LowcostSlamServer` with its own virtual environment, installs the
+udev rules (names of the header I2C buses, GPIO and PM QoS access, USB stick automount) and the systemd unit, then
+enables and starts it. The server comes up at every boot and is restarted 3 seconds after it dies. Run the script
+again to update the installed copy, `/opt/LowcostSlamServer/.env` is kept. Settings: `deploy/env.example`.
+
+```bash
+systemctl status lowcost-slam-api       # is it running
+journalctl -u lowcost-slam-api -f       # the log (kept on disk across reboots)
+sudo systemctl restart lowcost-slam-api
+sudo systemctl disable --now lowcost-slam-api   # back to running it by hand
+```
+The `radxa` user is in the `sudo` group, so `sudo` asks for its password. The service runs as root (the camera
+SDK needs USB access) and the sensors need no root: with the udev rules, the `gpio` and `i2c` groups are enough.
+
 ### USB stick
 Recordings go to a USB stick when one is mounted (in the `LowcostSlam` folder of the stick), else to
 `~/measurements` (`LOCAL_DATA_PATH`). Install the udev rule once and any stick (FAT, exFAT, NTFS, ext4) is mounted under

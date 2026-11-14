@@ -1,0 +1,11 @@
+# ROCK Pi X 40-pin header: stable names for the I2C buses and non-root access to GPIO and PM QoS.
+# Installed to /etc/udev/rules.d/ by deploy/install.sh (the same rules as scripts/bench/setup_i2c_gpio.sh).
+#
+# The plain /dev/i2c-N numbers are assigned in probe order and change between boots, so the server uses
+# the names below:  pins 3/5 (GNSS receiver) and pins 27/28 (IMU).
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+SUBSYSTEM=="i2c-dev", KERNELS=="808622C1:02", SYMLINK+="i2c-header-3-5"
+SUBSYSTEM=="i2c-dev", KERNELS=="808622C1:04", SYMLINK+="i2c-header-27-28"
+# PM QoS: lets the server keep the CPUs out of C6/C7 (80 us to 10 ms wake-up) while recording, which
+# otherwise delays GPIO interrupt time stamps by up to ~1 ms.
+KERNEL=="cpu_dma_latency", GROUP="gpio", MODE="0660"
